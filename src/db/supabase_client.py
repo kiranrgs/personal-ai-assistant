@@ -31,13 +31,19 @@ def get_client() -> Client:
     return _client
 
 
-def get_or_create_chat(channel: str, external_chat_id: str, display_name: str | None = None) -> dict[str, Any]:
+def get_or_create_chat(
+    channel: str, external_chat_id: str, display_name: str | None = None, tenant_id: int = 0
+) -> dict[str, Any]:
+    """`tenant_id` scopes multi-tenant Telegram bots (see src/bot.py, 0003_tenants.sql) -
+    0 is always the default bot from .env; other channels (WhatsApp/Discord) don't use
+    multiple tenants today and can leave this at the default."""
     db = get_client()
     existing = (
         db.table("chats")
         .select("*")
         .eq("channel", channel)
         .eq("external_chat_id", external_chat_id)
+        .eq("tenant_id", tenant_id)
         .limit(1)
         .execute()
     )
@@ -45,10 +51,18 @@ def get_or_create_chat(channel: str, external_chat_id: str, display_name: str | 
         return existing.data[0]
     created = (
         db.table("chats")
-        .insert({"channel": channel, "external_chat_id": external_chat_id, "display_name": display_name})
+        .insert({
+            "channel": channel, "external_chat_id": external_chat_id,
+            "display_name": display_name, "tenant_id": tenant_id,
+        })
         .execute()
     )
     return created.data[0]
+
+
+def list_chats() -> list[dict[str, Any]]:
+    """Every known chat across every tenant/channel - used by the admin console."""
+    return get_client().table("chats").select("*").order("id").execute().data
 
 
 def get_chat_by_internal_id(chat_id: int) -> Optional[dict[str, Any]]:
@@ -330,3 +344,36 @@ def get_llm_usage_summary(chat_id: int, days: int = 30) -> dict[str, Any]:
         bucket["completion_tokens"] += row.get("completion_tokens") or 0
         bucket["calls"] += 1
     return {"since_days": days, "by_model": totals}
+
+
+# --- Tenants (multi-bot-token support - see src/bot.py, src/admin_server.py) ---
+
+def list_tenants(active_only: bool = True) -> list[dict[str, Any]]:
+    query = get_client().table("tenants").select("*").order("id")
+    if active_only:
+        query = query.eq("active", True)
+    return query.execute().data
+
+
+def get_tenant(tenant_id: int) -> Optional[dict[str, Any]]:
+    result = get_client().table("tenants").select("*").eq("id", tenant_id).limit(1).execute()
+    return result.data[0] if result.data else None
+
+
+def create_tenant(name: str, telegram_bot_token: str, telegram_allowed_chat_ids: str) -> dict[str, Any]:
+    result = (
+        get_client()
+        .table("tenants")
+        .insert({
+            "name": name,
+            "telegram_bot_token": telegram_bot_token,
+            "telegram_allowed_chat_ids": telegram_allowed_chat_ids,
+        })
+        .execute()
+    )
+    return result.data[0]
+
+
+def set_tenant_active(tenant_id: int, active: bool) -> dict[str, Any]:
+    result = get_client().table("tenants").update({"active": active}).eq("id", tenant_id).execute()
+    return result.data[0]

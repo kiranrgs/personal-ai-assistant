@@ -1,9 +1,10 @@
 # personal-ai-assistant
 
-A personal AI assistant that runs on your desktop tower, reachable via
-Telegram (and WhatsApp), with Groq (default) or a local Ollama model as the
-LLM, and tool integrations for email, calendar, smart home, files, web
-research, rides/food, calls, and social summaries.
+A personal AI assistant that runs on Windows, macOS, or Ubuntu/Linux (an
+always-on machine, e.g. a desktop tower or Mac Studio), reachable via
+Telegram (and WhatsApp/Discord), with Groq (default) or a local Ollama
+model as the LLM, and tool integrations for email, calendar, smart home,
+files, web research, rides/food, calls, job search, and social summaries.
 
 ## How it works
 
@@ -40,6 +41,12 @@ Telegram / WhatsApp  --->  orchestrator (LLM + tool-calling loop)  --->  integra
   user's data and never able to touch shared admin-only settings (bot
   tokens, Supabase key, the allow-list itself). Use `/whoami`, `/myconfig`,
   `/set`, `/unset`, and `/household` to manage this.
+- **Multi-tenant bots** ([src/admin_server.py](src/admin_server.py), [src/bot.py](src/bot.py)) - there is no
+  `.env`-configured default bot. Every Telegram bot, including the very
+  first one, is registered through a small password-protected admin web
+  console ("tenants" - own `@BotFather` token + own allow-list, fully
+  isolated chat history from each other), instead of hand-editing `.env`/
+  restarting for each one - see SETUP.md section 3.
 
 ## Security model (read this before configuring real credentials)
 
@@ -49,7 +56,13 @@ Telegram / WhatsApp  --->  orchestrator (LLM + tool-calling loop)  --->  integra
    new path to extract them. For purchases, it drafts everything else, asks
    you to confirm, then brings the vault app to the foreground
    ([src/integrations/vault_bridge/personal_key_vault_client.py](src/integrations/vault_bridge/personal_key_vault_client.py)) so *you*
-   copy/paste the card.
+   copy/paste the card. Since personal-key-vault has its own, separate
+   Supabase Auth account (unrelated to this app's), every chat must first
+   link its own vault account email via `/set VAULT_ACCOUNT_EMAIL ...` -
+   this app refuses to open the vault for an unlinked chat, and always
+   echoes back the linked email so you can confirm the unlocked vault
+   matches before using a saved card, reducing the risk of one person
+   using another's cards on a shared machine.
 2. **No fully-autonomous purchases/bookings.** Uber, Lyft, DoorDash,
    GrubHub, Domino's, and ticket sites don't offer personal-use booking
    APIs; automating their web checkout would violate their Terms of Service
@@ -60,8 +73,9 @@ Telegram / WhatsApp  --->  orchestrator (LLM + tool-calling loop)  --->  integra
    always does.
 4. **Everything is audited.** Every tool call and every confirm/reject
    decision is written to the `audit_log` table.
-5. **Access is allow-listed.** Only chat IDs in `TELEGRAM_ALLOWED_CHAT_IDS`
-   get responses.
+5. **Access is allow-listed.** Only chat IDs on a tenant's own allowed-chat
+   list (registered via the admin console - see the Multi-tenant bots
+   bullet above) get responses.
 6. **One deliberate, explicit exception to rule 3: household geofencing.**
    `src/integrations/smart_home/household_presence.py`'s auto-away/auto-home
    automation actuates Clare Home scenes *without* a Telegram confirm step.
@@ -74,13 +88,19 @@ Telegram / WhatsApp  --->  orchestrator (LLM + tool-calling loop)  --->  integra
 7. Treat `.env`, `config/tokens/`, `config/users/` (per-user overrides), and
    any downloaded OAuth client secret JSON as sensitive - they're already
    excluded via `.gitignore`.
+8. **Admin console uses HTTP Basic Auth.** [src/admin_server.py](src/admin_server.py) refuses every
+   request until `ADMIN_PASSWORD` is set, but Basic Auth alone offers no
+   protection against network eavesdropping - always put it behind HTTPS
+   (reverse proxy/tunnel) if it's reachable beyond `localhost`.
 
 ## Setup
 
 Full, step-by-step instructions for setting this up on a fresh machine
-(prerequisites, every integration's credential walkthrough, running it,
-keeping it alive via Task Scheduler, and troubleshooting) live in
-**[SETUP.md](SETUP.md)**. Quick version if you just want the shape of it:
+(prerequisites for Windows/macOS/Ubuntu, every integration's credential
+walkthrough, running it, keeping it alive after reboot/login on each OS,
+and troubleshooting) live in **[SETUP.md](SETUP.md)**. Quick version if you
+just want the shape of it (Windows PowerShell shown; see SETUP.md section 1
+for the macOS/Ubuntu equivalent):
 
 ```powershell
 git clone https://github.com/kiranrgs/personal-ai-assistant.git
@@ -90,12 +110,16 @@ python -m venv .venv
 pip install -r requirements.txt
 copy .env.example .env
 # fill in .env with the credentials you want (see SETUP.md), then:
-python -m src.bot                          # Telegram bot (primary)
-uvicorn src.webhook_server:app --port 8000  # WhatsApp + interactive calls (optional)
+uvicorn src.admin_server:app --port 8090        # 1. Admin console: register your first Telegram bot here
+python -m src.bot                              # 2. Telegram bot(s) - reads tenants registered above
+uvicorn src.webhook_server:app --port 8000      # WhatsApp + interactive calls (optional)
 ```
 
-Every integration degrades gracefully - you don't need every credential
-filled in before first run, only the ones you plan to use.
+There's no `.env`-configured Telegram bot token anymore - every bot,
+including your first one, is registered through the admin console (see
+SETUP.md section 3). Every other integration still degrades gracefully -
+you don't need every credential filled in before first run, only the ones
+you plan to use.
 
 ## Implementation status
 
@@ -133,6 +157,9 @@ filled in before first run, only the ones you plan to use.
 | LLM usage/cost visibility | Working - `get_llm_usage_summary`, logged per chat/provider/model |
 | CI (GitHub Actions) | Working - runs `pytest` on push/PR |
 | Docker | Single-service image (bot only) - see `Dockerfile` for LAN-dependency caveats |
+| Multi-tenant Telegram bots + admin console | Working - `src/admin_server.py`; new/changed tenants take effect on the next bot restart |
+| Job search across multiple portals (LinkedIn/Indeed/Glassdoor/ZipRecruiter) | Working once a search API key is set (web-search based, not a live ATS feed); save your profile once via `set_job_search_profile` |
+| Cross-platform (Windows/macOS/Ubuntu) | Working - pure Python + pathlib; see SETUP.md for OS-specific run/keep-alive steps |
 
 ## Adding a new integration
 1. Add a module under `src/integrations/<area>/`.

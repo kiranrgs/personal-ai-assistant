@@ -25,10 +25,6 @@ def _split_csv(value: str) -> list[str]:
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=str(ROOT / ".env"), extra="ignore")
 
-    # Telegram
-    telegram_bot_token: str = Field(default="", alias="TELEGRAM_BOT_TOKEN")
-    telegram_allowed_chat_ids: str = Field(default="", alias="TELEGRAM_ALLOWED_CHAT_IDS")
-
     # WhatsApp (via Twilio)
     whatsapp_enabled: bool = Field(default=False, alias="WHATSAPP_ENABLED")
     twilio_whatsapp_from: str = Field(default="", alias="TWILIO_WHATSAPP_FROM")
@@ -97,6 +93,13 @@ class Settings(BaseSettings):
     search_api_key: str = Field(default="", alias="SEARCH_API_KEY")
     search_provider: str = Field(default="bing", alias="SEARCH_PROVIDER")
 
+    # Job search (reuses SEARCH_API_KEY above - no separate credential)
+    job_search_portals: str = Field(
+        default="linkedin.com/jobs,indeed.com,glassdoor.com/job-listing,ziprecruiter.com",
+        alias="JOB_SEARCH_PORTALS",
+    )
+    job_search_default_location: str = Field(default="", alias="JOB_SEARCH_DEFAULT_LOCATION")
+
     # Wishlist price monitoring
     wishlist_check_interval_hours: int = Field(default=6, alias="WISHLIST_CHECK_INTERVAL_HOURS")
 
@@ -119,13 +122,27 @@ class Settings(BaseSettings):
     discord_bot_token: str = Field(default="", alias="DISCORD_BOT_TOKEN")
     discord_allowed_channel_ids: str = Field(default="", alias="DISCORD_ALLOWED_CHANNEL_IDS")
 
-    # Sibling apps
-    finance_bot_path: str = Field(default=r"C:\GitHub\finance-bot", alias="FINANCE_BOT_PATH")
-    personal_key_vault_path: str = Field(default=r"C:\GitHub\personal-key-vault", alias="PERSONAL_KEY_VAULT_PATH")
+    # Admin console (src/admin_server.py) - multi-tenant Telegram bot
+    # registration + editing any user's per-user overrides from a browser.
+    # Left blank by default (fails closed: the console refuses every
+    # request until you set a real password).
+    admin_username: str = Field(default="admin", alias="ADMIN_USERNAME")
+    admin_password: str = Field(default="", alias="ADMIN_PASSWORD")
 
-    @property
-    def telegram_allowed_chat_id_list(self) -> list[int]:
-        return [int(v) for v in _split_csv(self.telegram_allowed_chat_ids)]
+    # Sibling apps - no platform-specific default; this repo runs on
+    # Windows, macOS, and Linux/Ubuntu, so point this at wherever you
+    # actually cloned the sibling project on your machine.
+    finance_bot_path: str = Field(default="", alias="FINANCE_BOT_PATH")
+    personal_key_vault_path: str = Field(default="", alias="PERSONAL_KEY_VAULT_PATH")
+
+    # personal-key-vault is a separate, zero-knowledge app with its own
+    # Supabase Auth (its own email/password, unrelated to this app's
+    # Supabase project). This is set per-user (via /set, never shared
+    # admin-wide) to the email that person signed up with there, so
+    # open_key_vault_app() can refuse to run for a chat that hasn't
+    # explicitly linked an account - see
+    # src/integrations/vault_bridge/personal_key_vault_client.py.
+    vault_account_email: str = Field(default="", alias="VAULT_ACCOUNT_EMAIL")
 
     @property
     def discord_allowed_channel_id_list(self) -> list[int]:
@@ -154,6 +171,10 @@ class Settings(BaseSettings):
     @property
     def irobot_robot_entries(self) -> list[str]:
         return _split_csv(self.irobot_robot_ips)
+
+    @property
+    def job_search_portal_list(self) -> list[str]:
+        return _split_csv(self.job_search_portals)
 
 
 @lru_cache

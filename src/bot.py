@@ -1,14 +1,23 @@
 """Entrypoint: Telegram bot that routes messages through the orchestrator,
 renders confirm/reject prompts for sensitive actions, and owns the daily
 scheduled jobs (email/briefing summary, Twitter/X digest, wishlist price
-checks, food deals).
+checks, food deals, job search).
+
+Supports more than one independent Telegram bot in the same process
+("tenants" - own bot token + own allow-list each, fully isolated from each
+other). Every tenant, including the very first one, is registered via the
+admin console (see src/admin_server.py) - there is no .env-configured
+default bot anymore, so at least one tenant must exist in Supabase before
+this process will start; see `_load_tenants()` below.
 
 Run with: python -m src.bot
 """
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import logging
+from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
@@ -36,6 +45,7 @@ from src.integrations.briefing import daily_briefing  # noqa: F401
 from src.integrations.calendar_ import google_calendar, icloud_calendar, outlook_calendar  # noqa: F401
 from src.integrations.email import gmail, icloud_yahoo_imap, outlook, package_tracking  # noqa: F401
 from src.integrations.files import google_drive, google_sheets, icloud_files  # noqa: F401
+from src.integrations.jobs import job_search  # noqa: F401
 from src.integrations.rides_food import dominos, food_delivery, food_deals, rides  # noqa: F401
 from src.integrations.shopping import wishlist  # noqa: F401
 from src.integrations.smart_home import (  # noqa: F401
@@ -57,10 +67,17 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(na
 log = logging.getLogger("bot")
 
 
-def _is_allowed(chat_id: int) -> bool:
-    settings = get_settings()
-    allowed = settings.telegram_allowed_chat_id_list
+def _split_csv_ints(value: str) -> list[int]:
+    return [int(v.strip()) for v in value.split(",") if v.strip()]
+
+
+def _is_allowed(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    allowed = context.bot_data.get("allowed_chat_ids") or []
     return not allowed or chat_id in allowed
+
+
+def _tenant_id(context: ContextTypes.DEFAULT_TYPE) -> int:
+    return context.bot_data.get("tenant_id", 0)
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -79,7 +96,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def whoami_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_chat is None:
         return
-    chat_row = db.get_or_create_chat("telegram", str(update.effective_chat.id), update.effective_chat.full_name)
+    chat_row = db.get_or_create_chat(
+        "telegram", str(update.effective_chat.id), update.effective_chat.full_name, tenant_id=_tenant_id(context)
+    )
     user = db.get_or_create_user(chat_row["id"])
     await update.effective_chat.send_message(
         f"Telegram chat id: {update.effective_chat.id}\n"
@@ -91,7 +110,9 @@ async def whoami_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def myconfig_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_chat is None:
         return
-    chat_row = db.get_or_create_chat("telegram", str(update.effective_chat.id), update.effective_chat.full_name)
+    chat_row = db.get_or_create_chat(
+        "telegram", str(update.effective_chat.id), update.effective_chat.full_name, tenant_id=_tenant_id(context)
+    )
     overrides = user_config.list_user_overrides_masked(chat_row["id"])
     if not overrides:
         await update.effective_chat.send_message(
@@ -109,7 +130,9 @@ async def set_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if len(context.args or []) < 2:
         await update.effective_chat.send_message("Usage: /set KEY VALUE")
         return
-    chat_row = db.get_or_create_chat("telegram", str(update.effective_chat.id), update.effective_chat.full_name)
+    chat_row = db.get_or_create_chat(
+        "telegram", str(update.effective_chat.id), update.effective_chat.full_name, tenant_id=_tenant_id(context)
+    )
     key, value = context.args[0], " ".join(context.args[1:])
     try:
         user_config.set_user_override(chat_row["id"], key, value)
@@ -124,7 +147,9 @@ async def unset_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not context.args:
         await update.effective_chat.send_message("Usage: /unset KEY")
         return
-    chat_row = db.get_or_create_chat("telegram", str(update.effective_chat.id), update.effective_chat.full_name)
+    chat_row = db.get_or_create_chat(
+        "telegram", str(update.effective_chat.id), update.effective_chat.full_name, tenant_id=_tenant_id(context)
+    )
     user_config.unset_user_override(chat_row["id"], context.args[0])
     await update.effective_chat.send_message(f"Removed your override for {context.args[0].upper()}.")
 
@@ -135,7 +160,9 @@ async def household_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not context.args:
         await update.effective_chat.send_message("Usage: /household NAME (everyone using the same NAME shares geofencing away/home automation)")
         return
-    chat_row = db.get_or_create_chat("telegram", str(update.effective_chat.id), update.effective_chat.full_name)
+    chat_row = db.get_or_create_chat(
+        "telegram", str(update.effective_chat.id), update.effective_chat.full_name, tenant_id=_tenant_id(context)
+    )
     household = " ".join(context.args)
     db.set_user_household(chat_row["id"], household)
     await update.effective_chat.send_message(f"You're now part of household '{household}'.")
@@ -145,11 +172,11 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_chat is None or update.message is None or update.message.text is None:
         return
     chat_id = update.effective_chat.id
-    if not _is_allowed(chat_id):
+    if not _is_allowed(chat_id, context):
         await update.effective_chat.send_message("This bot isn't configured to respond to this chat.")
         return
 
-    chat_row = db.get_or_create_chat("telegram", str(chat_id), update.effective_chat.full_name)
+    chat_row = db.get_or_create_chat("telegram", str(chat_id), update.effective_chat.full_name, tenant_id=_tenant_id(context))
     result = handle_user_message(chat_row["id"], update.message.text)
     await _reply_with_pending_action(update, result)
 
@@ -158,7 +185,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_chat is None or update.message is None or update.message.voice is None:
         return
     chat_id = update.effective_chat.id
-    if not _is_allowed(chat_id):
+    if not _is_allowed(chat_id, context):
         await update.effective_chat.send_message("This bot isn't configured to respond to this chat.")
         return
 
@@ -174,7 +201,7 @@ async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_chat.send_message("I couldn't make out any speech in that voice note.")
         return
 
-    chat_row = db.get_or_create_chat("telegram", str(chat_id), update.effective_chat.full_name)
+    chat_row = db.get_or_create_chat("telegram", str(chat_id), update.effective_chat.full_name, tenant_id=_tenant_id(context))
     result = handle_user_message(chat_row["id"], text)
     await update.effective_chat.send_message(f"🎙️ Heard: \"{text}\"")
     await _reply_with_pending_action(update, result)
@@ -207,17 +234,19 @@ async def on_confirmation_callback(update: Update, context: ContextTypes.DEFAULT
 
 
 async def _send_daily_summary(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """job.data: {'chat_id': int, 'kind': 'email' | 'briefing' | 'twitter_followed' | 'fooddeals'}.
+    """job.data: {'chat_id': int, 'kind': 'email' | 'briefing' | 'twitter_followed' | 'fooddeals' | 'jobsearch', 'tenant_id': int}.
     Runs the matching prompt and posts the result."""
     job = context.job
     assert job is not None and job.data is not None
     chat_id, kind = job.data["chat_id"], job.data["kind"]
-    chat_row = db.get_or_create_chat("telegram", str(chat_id))
+    tenant_id = job.data.get("tenant_id", 0)
+    chat_row = db.get_or_create_chat("telegram", str(chat_id), tenant_id=tenant_id)
     prompts = {
         "email": "Summarize all of today's emails across every configured account.",
         "briefing": "Generate my daily briefing (email, calendar, weather).",
         "twitter_followed": "Summarize what I missed today on Twitter/X across the accounts I follow.",
         "fooddeals": "Check for any good nearby restaurant/food-delivery deals today.",
+        "jobsearch": "Search for job openings that match my saved job search profile across multiple job portals, and only mention new-looking matches.",
     }
     result = handle_user_message(chat_row["id"], prompts[kind])
     try:
@@ -227,15 +256,20 @@ async def _send_daily_summary(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def _check_wishlist_prices(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Global job (not per-chat): scans every user's active wishlist items,
-    and for any that hit their target price, pushes a Telegram alert with a
-    Confirm-to-order button to that item's owning chat.
+    """Global-per-tenant job: scans every user's active wishlist items, and
+    for any that hit their target price, pushes a Telegram alert with a
+    Confirm-to-order button to that item's owning chat - but only for chats
+    that belong to THIS tenant's bot (wishlist items span every tenant, so
+    each tenant's own repeating job must filter down to its own chats,
+    otherwise it would try to message a chat via the wrong bot token).
     """
+    job = context.job
+    tenant_id = job.data.get("tenant_id", 0) if job is not None and job.data else 0
     with set_current_chat(None):
         alerts = wishlist.check_all_wishlist_prices()
     for item in alerts:
         chat_row = db.get_chat_by_internal_id(item["chat_id"])
-        if chat_row is None or chat_row["channel"] != "telegram":
+        if chat_row is None or chat_row["channel"] != "telegram" or chat_row.get("tenant_id", 0) != tenant_id:
             continue  # push notifications are only wired up for Telegram/WhatsApp-via-poll today
         pending = wishlist.request_place_wishlist_order(item["id"])
         if not isinstance(pending, PendingConfirmation):
@@ -256,39 +290,54 @@ async def _check_wishlist_prices(context: ContextTypes.DEFAULT_TYPE) -> None:
             log.exception("Failed to send wishlist alert for item %s", item["id"])
 
 
-def _register_default_jobs(app: Application) -> None:
+def _register_default_jobs(app: Application, tenant: dict[str, Any]) -> None:
     """Daily jobs run in UTC by default (PTB's job_queue default timezone).
     Adjust the hour/minute below to match your local offset, or set
     `Application.builder().defaults(Defaults(tzinfo=...))` for a permanent fix.
     """
     settings = get_settings()
-    for chat_id in settings.telegram_allowed_chat_id_list:
+    tenant_id = tenant["id"]
+    for chat_id in _split_csv_ints(tenant.get("telegram_allowed_chat_ids", "")):
         app.job_queue.run_daily(
             _send_daily_summary, time=dt.time(hour=7, minute=0),
-            data={"chat_id": chat_id, "kind": "briefing"}, name=f"daily_briefing_{chat_id}",
+            data={"chat_id": chat_id, "kind": "briefing", "tenant_id": tenant_id},
+            name=f"daily_briefing_{tenant_id}_{chat_id}",
         )
         app.job_queue.run_daily(
             _send_daily_summary, time=dt.time(hour=8, minute=0),
-            data={"chat_id": chat_id, "kind": "twitter_followed"}, name=f"daily_twitter_digest_{chat_id}",
+            data={"chat_id": chat_id, "kind": "twitter_followed", "tenant_id": tenant_id},
+            name=f"daily_twitter_digest_{tenant_id}_{chat_id}",
+        )
+        app.job_queue.run_daily(
+            _send_daily_summary, time=dt.time(hour=9, minute=0),
+            data={"chat_id": chat_id, "kind": "jobsearch", "tenant_id": tenant_id},
+            name=f"daily_jobsearch_{tenant_id}_{chat_id}",
         )
         app.job_queue.run_daily(
             _send_daily_summary, time=dt.time(hour=11, minute=30),
-            data={"chat_id": chat_id, "kind": "fooddeals"}, name=f"daily_fooddeals_{chat_id}",
+            data={"chat_id": chat_id, "kind": "fooddeals", "tenant_id": tenant_id},
+            name=f"daily_fooddeals_{tenant_id}_{chat_id}",
         )
     app.job_queue.run_repeating(
         _check_wishlist_prices,
         interval=dt.timedelta(hours=settings.wishlist_check_interval_hours),
         first=dt.timedelta(minutes=5),
-        name="wishlist_price_check",
+        data={"tenant_id": tenant_id},
+        name=f"wishlist_price_check_{tenant_id}",
     )
 
 
-def build_application() -> Application:
-    settings = get_settings()
-    if not settings.telegram_bot_token:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN is not set in .env")
+def build_application(tenant: dict[str, Any]) -> Application:
+    """`tenant` is `{"id": int, "name": str, "telegram_bot_token": str,
+    "telegram_allowed_chat_ids": str}` - see `_load_tenants()`."""
+    token = tenant.get("telegram_bot_token", "")
+    if not token:
+        raise RuntimeError(f"Tenant '{tenant.get('name', tenant.get('id'))}' has no Telegram bot token configured.")
 
-    app = Application.builder().token(settings.telegram_bot_token).build()
+    app = Application.builder().token(token).build()
+    app.bot_data["tenant_id"] = tenant["id"]
+    app.bot_data["tenant_name"] = tenant.get("name", "default")
+    app.bot_data["allowed_chat_ids"] = _split_csv_ints(tenant.get("telegram_allowed_chat_ids", ""))
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("whoami", whoami_command))
     app.add_handler(CommandHandler("myconfig", myconfig_command))
@@ -301,11 +350,54 @@ def build_application() -> Application:
     return app
 
 
+def _load_tenants() -> list[dict[str, Any]]:
+    """Every tenant - their own bot token + own allow-list, fully isolated
+    from each other - is registered via the admin console
+    (src/admin_server.py) and stored in Supabase; they're picked up here at
+    process start (not hot-reloaded into an already-running bot). There is
+    no .env-configured default bot - run the admin console and register at
+    least one tenant before starting this process for the first time.
+    """
+    try:
+        return [t for t in db.list_tenants() if t.get("telegram_bot_token")]
+    except Exception:
+        log.info(
+            "Couldn't load tenants from Supabase - either it's not configured yet (see SETUP.md "
+            "section 2), or none have been registered via the admin console yet (section 3)."
+        )
+        return []
+
+
+async def _run_all(tenants: list[dict[str, Any]]) -> None:
+    apps = [build_application(t) for t in tenants]
+    for app, tenant in zip(apps, tenants):
+        _register_default_jobs(app, tenant)
+    for app in apps:
+        await app.initialize()
+        await app.start()
+        await app.updater.start_polling()
+    try:
+        await asyncio.Event().wait()  # run until interrupted (Ctrl+C / process stop)
+    finally:
+        for app in apps:
+            await app.updater.stop()
+            await app.stop()
+            await app.shutdown()
+
+
 def main() -> None:
-    app = build_application()
-    _register_default_jobs(app)
-    log.info("Bot starting (long polling)...")
-    app.run_polling()
+    tenants = _load_tenants()
+    if not tenants:
+        raise RuntimeError(
+            "No Telegram bot configured. Run the admin console "
+            "(uvicorn src.admin_server:app --port 8090) and register at least one tenant "
+            "on its Tenants page - see SETUP.md section 3."
+        )
+    log.info("Starting %d Telegram bot instance(s): %s", len(tenants), ", ".join(str(t["name"]) for t in tenants))
+    try:
+        asyncio.run(_run_all(tenants))
+    except KeyboardInterrupt:
+        log.info("Shutting down...")
 
 
 if __name__ == "__main__":

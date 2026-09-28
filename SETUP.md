@@ -1,9 +1,12 @@
 # Setup guide (fresh machine)
 
 This is the full, step-by-step guide for getting `personal-ai-assistant`
-running on a Windows desktop tower from a clean checkout. It's more detailed
-than the README's quick-start so you can follow it on a machine that has
-never had this repo (or its dependencies) on it before.
+running from a clean checkout on **Windows, macOS (including Mac Studio),
+or Ubuntu/Linux** - any always-on machine works, this isn't Windows-only.
+Most steps are identical across all three; where a command differs, both
+versions are shown. It's more detailed than the README's quick-start so you
+can follow it on a machine that has never had this repo (or its
+dependencies) on it before.
 
 Estimated total time: 30-90 minutes, depending on how many integrations you
 configure on day one. You do **not** need to configure everything before
@@ -14,14 +17,21 @@ first run - every integration degrades gracefully (the tool just reports
 
 ## 0. Prerequisites
 
-- **Windows 10/11**, always-on desktop tower (per the project's design).
+- **An always-on machine**: Windows 10/11, macOS (Mac Studio or any Mac),
+  or Ubuntu/other Linux.
 - **Python 3.11 or 3.12** (64-bit). Check with:
-  ```powershell
-  python --version
   ```
-  If missing, install from [python.org/downloads](https://www.python.org/downloads/)
-  - check **"Add python.exe to PATH"** during install.
-- **Git** (to clone the repo) - [git-scm.com](https://git-scm.com/download/win).
+  python --version        # Windows
+  python3 --version       # macOS/Ubuntu
+  ```
+  - **Windows**: install from [python.org/downloads](https://www.python.org/downloads/)
+    - check **"Add python.exe to PATH"** during install.
+  - **macOS**: `brew install python@3.12` (install [Homebrew](https://brew.sh) first if needed), or the official installer from python.org.
+  - **Ubuntu**: `sudo apt update && sudo apt install python3 python3-venv python3-pip`.
+- **Git** (to clone the repo):
+  - Windows: [git-scm.com](https://git-scm.com/download/win).
+  - macOS: `brew install git` (or Xcode Command Line Tools: `xcode-select --install`).
+  - Ubuntu: `sudo apt install git`.
 - A **Telegram account** (for the primary interaction channel).
 - Optional but recommended: a **free Supabase account**
   ([supabase.com](https://supabase.com)) for persistent memory/audit log.
@@ -30,6 +40,7 @@ first run - every integration degrades gracefully (the tool just reports
 
 ## 1. Get the code and install dependencies
 
+**Windows (PowerShell):**
 ```powershell
 git clone https://github.com/kiranrgs/personal-ai-assistant.git
 cd personal-ai-assistant
@@ -39,12 +50,22 @@ pip install -r requirements.txt
 copy .env.example .env
 ```
 
+**macOS / Ubuntu (bash/zsh):**
+```bash
+git clone https://github.com/kiranrgs/personal-ai-assistant.git
+cd personal-ai-assistant
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+```
+
 > **Corporate proxy / SSL certificate errors during `pip install`?**
 > If you see `SSLCertVerificationError: unable to get local issuer
 > certificate`, your network is intercepting TLS (common on corporate
 > laptops/VPNs). Fixes, in order of preference:
 > 1. Ask IT for the corporate root CA `.pem` and run
->    `pip config set global.cert C:\path\to\corporate-ca.pem`, or
+>    `pip config set global.cert /path/to/corporate-ca.pem`, or
 > 2. Use a Python install that already trusts your corporate CA (e.g. one
 >    provisioned by your company's IT imaging), instead of a brand-new venv.
 
@@ -57,11 +78,11 @@ copy .env.example .env
 > `>=`.
 
 Verify the install:
-```powershell
+```
 pytest tests/ -v
 ```
-You should see `23 passed`. If any integration module fails to import,
-the error will name the missing package - re-run
+You should see all tests passing. If any integration module fails to
+import, the error will name the missing package - re-run
 `pip install -r requirements.txt`.
 
 ---
@@ -76,12 +97,15 @@ the error will name the missing package - re-run
 3. Then paste and run
    [supabase/migrations/0002_multi_user_household_wishlist.sql](supabase/migrations/0002_multi_user_household_wishlist.sql)
    too (additive - adds multi-user/household/presence tables, wishlist
-   tracking, LLM usage logging, and full-text conversation search). Run
-   0001 first, then 0002, in that order.
-4. **Project Settings -> API**: copy the **Project URL** and the
+   tracking, LLM usage logging, and full-text conversation search).
+4. Then paste and run
+   [supabase/migrations/0003_tenants.sql](supabase/migrations/0003_tenants.sql)
+   too (additive - adds the `tenants` table for multi-tenant Telegram bots,
+   see section 3). Run 0001, then 0002, then 0003, in that order.
+5. **Project Settings -> API**: copy the **Project URL** and the
    **`service_role` secret key** (not the `anon` key - this runs entirely
-   server-side, on your own tower, never exposed to a browser).
-5. In `.env`:
+   server-side, on your own machine, never exposed to a browser).
+6. In `.env`:
    ```
    SUPABASE_URL=https://xxxxx.supabase.co
    SUPABASE_SERVICE_ROLE_KEY=eyJ...
@@ -89,19 +113,55 @@ the error will name the missing package - re-run
 
 ---
 
-## 3. Telegram bot (primary interaction channel)
+## 3. Telegram bot(s) & admin console (required)
 
-1. Open Telegram, message [@BotFather](https://t.me/BotFather), send
-   `/newbot`, follow the prompts. Copy the token it gives you.
-2. In `.env`: `TELEGRAM_BOT_TOKEN=123456:ABC-...`
-3. Send **any message** to your new bot from your personal Telegram account
-   (so Telegram creates a chat record).
-4. In a browser, open:
-   `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates`
-   Find `"chat":{"id":123456789,...}` - that number is your chat ID.
-5. In `.env`: `TELEGRAM_ALLOWED_CHAT_IDS=123456789` (comma-separate if
+There is no `.env`-configured default bot - every Telegram bot, including
+your very first one, is registered through the small admin console
+(`src/admin_server.py`) instead of environment variables. This also means
+you can register more bots later (e.g. hosting this for a couple of
+households, each with their own `@BotFather` bot and allow-list, fully
+isolated conversation history from each other) without ever hand-editing
+`.env` or losing what's already running.
+
+1. Set an admin login in `.env` (this is the only credential needed to
+   reach the console itself - it doesn't belong to any one Telegram bot):
+   ```
+   ADMIN_USERNAME=admin
+   ADMIN_PASSWORD=<a real password - the console refuses all requests if this is blank>
+   ```
+2. Run it: `uvicorn src.admin_server:app --port 8090` (or
+   `scripts/run_admin_server.sh` / `scripts\run_admin_server.bat` - these
+   bind to `127.0.0.1` only by default). **Put it behind HTTPS** if it
+   needs to be reachable beyond localhost (same ngrok/Cloudflare
+   Tunnel/reverse-proxy caveat as the webhook server in section 7) - HTTP
+   Basic Auth sends your password on every request and needs TLS to not be
+   readable on the wire.
+3. Open `http://localhost:8090` (or your tunnel URL), sign in with
+   `ADMIN_USERNAME`/`ADMIN_PASSWORD`.
+4. Create your first Telegram bot with [@BotFather](https://t.me/BotFather):
+   send `/newbot`, follow the prompts, copy the token it gives you.
+5. Send **any message** to your new bot from your personal Telegram account
+   (so Telegram creates a chat record), then in a browser open
+   `https://api.telegram.org/bot<YOUR_TOKEN>/getUpdates` and find
+   `"chat":{"id":123456789,...}` - that number is your chat ID.
+6. Back in the admin console's **Tenants page**: give this bot a name,
+   paste in the token, and its allowed chat IDs (comma-separated if
    multiple people/devices should be allowed - e.g. your phone + your
-   spouse's).
+   spouse's). Submit, then start (or restart) `python -m src.bot` - new/
+   changed tenants are picked up at startup, not hot-reloaded into an
+   already-running process.
+7. Repeat step 4-6 (a *different* `@BotFather` bot each time) for any
+   additional, fully-isolated bot you want to run in the same process.
+8. **Users page:** view every known chat (across all tenants) and its
+   current per-user overrides (masked, same whitelist as `/set` - see
+   section 10), and set an override on someone's behalf without them
+   needing to type `/set` themselves.
+
+Every tenant's users are fully isolated from each other (separate bot
+token, separate allow-list, separate conversation history via the internal
+`tenant_id` column on each chat row - see
+`supabase/migrations/0003_tenants.sql`) even if two different people happen
+to share the same numeric Telegram user ID under two different bots.
 
 ---
 
@@ -240,13 +300,26 @@ the error will name the missing package - re-run
 
 ## 9. Sibling app integrations (optional)
 
-- **finance-bot**: set `FINANCE_BOT_PATH=C:\GitHub\finance-bot` (its own
-  path on this machine). The assistant subprocess-invokes finance-bot's own
-  `.venv` - so finance-bot must already be independently set up and working
-  there.
-- **personal-key-vault**: set `PERSONAL_KEY_VAULT_PATH=C:\GitHub\personal-key-vault`.
-  The assistant only ever brings this app to the foreground for you to
-  manually unlock and copy a card - it never reads its secrets.
+- **finance-bot**: set `FINANCE_BOT_PATH` to its own path on this machine
+  (e.g. `C:\GitHub\finance-bot` on Windows, `/home/you/finance-bot` on
+  Ubuntu, `/Users/you/finance-bot` on macOS). The assistant
+  subprocess-invokes finance-bot's own `.venv` - so finance-bot must already
+  be independently set up and working there.
+- **personal-key-vault**: same idea, set `PERSONAL_KEY_VAULT_PATH` to its
+  path on this machine. On macOS this is a `.app` bundle
+  (`personal-key-vault.app`) rather than a plain executable - see the
+  `sys.platform` branching in
+  `src/integrations/vault_bridge/personal_key_vault_client.py` if it can't
+  find it. The assistant only ever brings this app to the foreground for
+  you to manually unlock and copy a card - it never reads its secrets.
+  personal-key-vault has its **own, separate** Supabase Auth (its own
+  email/password, unrelated to this app's Supabase project) - since this
+  machine's one installed vault app could be signed into anyone's account,
+  each person must link their own chat to their own vault account email
+  once, via `/set VAULT_ACCOUNT_EMAIL you@example.com` (or the admin
+  console's Users page) - `open_key_vault_app()` refuses to run for a chat
+  that hasn't linked one, and always echoes back the linked email so you
+  can visually confirm the unlocked vault matches before copying a card.
 
 Skip either if you didn't clone those sibling repos onto this machine.
 
@@ -258,16 +331,16 @@ Every allow-listed Telegram chat ID is automatically its own "user" - no
 extra setup needed to isolate them. To let each person configure their
 *own* accounts/integrations instead of sharing one `.env`:
 
-1. Add everyone's chat ID to `TELEGRAM_ALLOWED_CHAT_IDS` (comma-separated,
-   see step 3).
+1. Add everyone's chat ID to that tenant's allowed chat IDs on the admin
+   console's Tenants page (comma-separated, see section 3).
 2. Each person messages the bot `/whoami` to confirm their chat is
    recognized, then `/set KEY VALUE` for anything personal - e.g.
    `/set GOOGLE_ACCOUNTS personal` or `/set TWITTER_FOLLOWED_HANDLES
    handle1,handle2`. `/myconfig` lists what's saved (values masked);
    `/unset KEY` removes one. Only a whitelisted subset of settings can be
    set this way (personal accounts/integrations) - shared admin-only
-   settings (bot tokens, Supabase key, the allow-list) always stay in the
-   root `.env`.
+   settings (bot tokens, Supabase key, allow-lists) always stay in the
+   root `.env`/admin console.
 3. For **household geofencing** (see next section and README's Security
    model), everyone in the same home runs `/household NAME` with the same
    `NAME` - this groups them so "everyone in this household is away" can be
@@ -338,17 +411,45 @@ anyone returns) - **without** a Telegram confirm step, by deliberate design
 4. In `.env`: `DISCORD_BOT_TOKEN=...`, `DISCORD_ALLOWED_CHANNEL_IDS=...`
    (right-click a channel -> Copy Channel ID, needs Developer Mode enabled
    in Discord settings).
-5. Run it as its own process: `python -m src.discord_bot`.
+5. Run it as its own process: `python -m src.discord_bot` (or
+   `scripts/run_discord_bot.sh` / `scripts\run_discord_bot.bat`).
 
 ---
 
-## 14. Run it
+## 14. Job search (optional)
 
-Up to three independent long-running processes, depending on which
-channels you configured:
+Searches multiple job portals (LinkedIn, Indeed, Glassdoor, ZipRecruiter by
+default) for openings matching role keywords you save once, via web search
+- reuses the same `SEARCH_API_KEY` from step 8, no separate credential
+needed.
+
+1. Make sure `SEARCH_API_KEY` is set (section 8).
+2. Optionally customize the portal list / a default location, in `.env`:
+   ```
+   JOB_SEARCH_PORTALS=linkedin.com/jobs,indeed.com,glassdoor.com/job-listing,ziprecruiter.com
+   JOB_SEARCH_DEFAULT_LOCATION=
+   ```
+   or per-user via `/set JOB_SEARCH_PORTALS ...` / `/set JOB_SEARCH_DEFAULT_LOCATION ...`.
+3. In chat, tell it your profile once, e.g. *"my job search profile is
+   senior backend engineer, staff software engineer, based in Austin TX,
+   remote ok"* - this calls `set_job_search_profile` and saves it (a real
+   web search + summarize pass, not fabricated matches).
+4. Then just ask *"any new job matches for me?"* any time, or let the daily
+   `jobsearch` job (see section 15) check every morning at 9am.
+
+This is web-search-based, not a live ATS/portal feed - none of these sites
+offer a personal-use "search jobs" API, same honesty tradeoff as the ticket
+search and food-deals integrations.
+
+---
+
+## 15. Run it
+
+Up to four independent long-running processes, depending on which channels/
+features you configured:
 
 ```powershell
-# Terminal 1 - Telegram bot (always needed)
+# Terminal 1 - Telegram bot (always needed) - runs every configured tenant
 python -m src.bot
 
 # Terminal 2 - WhatsApp + interactive-call webhooks + geofencing presence endpoint (only if configured)
@@ -356,9 +457,15 @@ uvicorn src.webhook_server:app --port 8000
 
 # Terminal 3 - Discord channel (only if configured)
 python -m src.discord_bot
+
+# Terminal 4 - Admin console: only needed when adding/editing tenants or user overrides
+uvicorn src.admin_server:app --port 8090
 ```
 
-Or the batch scripts: `scripts\run_bot.bat`, `scripts\run_webhook_server.bat`.
+Windows: `scripts\run_bot.bat`, `scripts\run_webhook_server.bat`,
+`scripts\run_discord_bot.bat`, `scripts\run_admin_server.bat`.
+macOS/Ubuntu: the `.sh` equivalents in `scripts/` (`chmod +x scripts/*.sh`
+once, then run them directly, or `bash scripts/run_bot.sh`).
 
 **Smoke test:** message your Telegram bot "what can you help me with?" - you
 should get a reply. Try something read-only like "what's on my calendar
@@ -367,7 +474,9 @@ Telegram **voice note** instead of typing - it's transcribed automatically.
 
 ---
 
-## 15. Keep it running after reboot/login (Windows Task Scheduler)
+## 16. Keep it running after reboot/login
+
+### Windows (Task Scheduler)
 
 1. Open **Task Scheduler** -> **Create Task** (not "Basic Task", so you get
    the full options dialog).
@@ -381,12 +490,68 @@ Telegram **voice note** instead of typing - it's transcribed automatically.
 5. **Conditions** tab: uncheck "Start the task only if the computer is on
    AC power" if this is a desktop tower (usually irrelevant, but check on
    laptops).
-6. Repeat steps 1-5 for `run_webhook_server.bat` as a second task, if you
-   configured Twilio/WhatsApp.
+6. Repeat steps 1-5 for `run_webhook_server.bat` (and `run_admin_server.bat`,
+   `run_discord_bot.bat`) as additional tasks, for whichever other
+   processes you configured.
 
 This mirrors the same Task Scheduler pattern used by the sibling
 `finance-bot` project - see its `setup_task_scheduler.bat` if you want a
 scripted version of the above instead of the GUI.
+
+### macOS (launchd)
+
+1. Create `~/Library/LaunchAgents/com.personal-ai-assistant.bot.plist`:
+   ```xml
+   <?xml version="1.0" encoding="UTF-8"?>
+   <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+     "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+   <plist version="1.0"><dict>
+     <key>Label</key><string>com.personal-ai-assistant.bot</string>
+     <key>ProgramArguments</key>
+     <array>
+       <string>/Users/you/personal-ai-assistant/scripts/run_bot.sh</string>
+     </array>
+     <key>WorkingDirectory</key><string>/Users/you/personal-ai-assistant</string>
+     <key>RunAtLoad</key><true/>
+     <key>KeepAlive</key><true/>
+     <key>StandardOutPath</key><string>/tmp/personal-ai-assistant-bot.log</string>
+     <key>StandardErrorPath</key><string>/tmp/personal-ai-assistant-bot.err</string>
+   </dict></plist>
+   ```
+   (adjust the paths to wherever you cloned the repo; `chmod +x
+   scripts/run_bot.sh` first).
+2. Load it: `launchctl load ~/Library/LaunchAgents/com.personal-ai-assistant.bot.plist`.
+3. Repeat for `run_webhook_server.sh`/`run_admin_server.sh`/
+   `run_discord_bot.sh` as separate `.plist` files (different `Label`,
+   `ProgramArguments`, log paths) for whichever other processes you
+   configured.
+4. `launchctl unload <plist>` to stop; check logs at the `StandardOutPath`/
+   `StandardErrorPath` you set if it's not responding.
+
+### Ubuntu (systemd user service)
+
+1. Create `~/.config/systemd/user/personal-ai-assistant-bot.service`:
+   ```ini
+   [Unit]
+   Description=personal-ai-assistant Telegram bot
+   After=network-online.target
+
+   [Service]
+   WorkingDirectory=/home/you/personal-ai-assistant
+   ExecStart=/home/you/personal-ai-assistant/scripts/run_bot.sh
+   Restart=on-failure
+
+   [Install]
+   WantedBy=default.target
+   ```
+   (adjust the path; `chmod +x scripts/run_bot.sh` first).
+2. `systemctl --user daemon-reload && systemctl --user enable --now personal-ai-assistant-bot`.
+3. `loginctl enable-linger $USER` so it keeps running after you log out of
+   the desktop session (not just while a terminal is open).
+4. Repeat with a new unit file (different name, `ExecStart`) for
+   `run_webhook_server.sh`/`run_admin_server.sh`/`run_discord_bot.sh` for
+   whichever other processes you configured.
+5. `journalctl --user -u personal-ai-assistant-bot -f` to tail logs.
 
 ---
 
@@ -396,11 +561,16 @@ scripted version of the above instead of the GUI.
 |---|---|
 | `SSLCertVerificationError` during `pip install` | Corporate proxy intercepting TLS - point pip at the corporate CA, or use a Python install that already trusts it. |
 | `ResolutionImpossible` during `pip install` | A dependency pin was tightened to `==` somewhere - use `>=` pins in `requirements.txt`. |
-| Bot never replies on Telegram | Check `TELEGRAM_ALLOWED_CHAT_IDS` includes your chat ID (see step 3); check the bot process's console for errors. |
+| Bot never replies on Telegram | Check your chat ID is in that tenant's allowed chat IDs on the admin console's Tenants page (see section 3); check the bot process's console for errors. |
+| "No Telegram bot configured" on `python -m src.bot` startup | No tenant exists in Supabase yet - open the admin console and add one on the Tenants page first (section 3). |
 | "not configured" tool errors | Expected for any integration you haven't filled in `.env` yet - not a bug. |
 | Device-code sign-in link never appears (MS365) | Run `python -m src.bot` directly in a visible terminal at least once - the link is printed to console, not sent via Telegram. |
 | Interactive calls / WhatsApp don't respond | `PUBLIC_WEBHOOK_BASE_URL` must be a live, currently-running tunnel URL that matches what's set in the Twilio console - ngrok URLs rotate on restart. |
 | `SyntaxWarning: invalid escape sequence` on startup | Harmless - cosmetic Python warning, doesn't affect behavior. |
+| Admin console returns `503` on every request | `ADMIN_PASSWORD` is blank in `.env` - it fails closed on purpose until you set a real password. |
+| New/edited tenant in the admin console isn't picked up | Tenants are only loaded at `python -m src.bot` startup, not hot-reloaded - restart the bot process. |
+| `python-key-vault`/`finance-bot` "not found" on macOS/Ubuntu | Set `PERSONAL_KEY_VAULT_PATH`/`FINANCE_BOT_PATH` to that sibling repo's actual location on this machine (any OS path works, not just Windows). |
+| `open_key_vault_app` returns `not_linked` | That chat hasn't linked a personal-key-vault account yet - send `/set VAULT_ACCOUNT_EMAIL you@example.com` (section 9) once. |
 
 ## Security reminders (see README's "Security model" for full detail)
 

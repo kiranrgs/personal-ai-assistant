@@ -40,6 +40,7 @@ import pytest
     "src.integrations.briefing.daily_briefing",
     "src.integrations.shopping.wishlist",
     "src.integrations.email.package_tracking",
+    "src.integrations.jobs.job_search",
     "src.core.preferences",
     "src.core.memory_search",
     "src.core.usage_tool",
@@ -67,6 +68,7 @@ def test_tool_registry_has_expected_tools() -> None:
         "generate_daily_briefing",
         "set_preference", "get_preferences",
         "search_past_conversations", "get_llm_usage_summary",
+        "set_job_search_profile", "search_jobs",
     ]:
         importlib.import_module("src.bot")
         assert any(t.name == name for t in all_tools()), f"Tool '{name}' was not registered"
