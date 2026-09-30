@@ -77,8 +77,9 @@ def open_key_vault_app() -> dict[str, Any]:
             "status": "not_linked",
             "message": (
                 "You haven't linked a personal-key-vault account to this chat yet. "
-                "Send `/set VAULT_ACCOUNT_EMAIL you@example.com` (the same email you use to sign in "
-                "there) once, then try again - this prevents accidentally using someone else's saved cards."
+                "Ask the admin to set VAULT_ACCOUNT_EMAIL for this chat on the admin console's Users page "
+                "(the same email you use to sign in there), then try again - this prevents accidentally "
+                "using someone else's saved cards."
             ),
         }
     root = Path(settings.personal_key_vault_path)
@@ -139,7 +140,8 @@ def _require_api_ready() -> Optional[dict[str, Any]]:
             "status": "not_linked",
             "message": (
                 "You haven't linked a personal-key-vault account to this chat yet. "
-                "Send `/set VAULT_ACCOUNT_EMAIL you@example.com` once, then try again."
+                "Ask the admin to set VAULT_ACCOUNT_EMAIL for this chat on the admin console's Users page, "
+                "then try again."
             ),
         }
     if not settings.vault_api_enabled:
@@ -147,11 +149,10 @@ def _require_api_ready() -> Optional[dict[str, Any]]:
             "status": "vault_api_disabled",
             "message": (
                 "The personal-key-vault companion API isn't enabled for this chat yet. In personal-key-vault, "
-                "sign in and enable it (Security tab -> 'Enable companion API'), then send "
-                "`/set VAULT_COMPANION_PORT <port>` and `/set VAULT_COMPANION_TOKEN <token>` (from that same "
-                "tab / this machine's companion.json), and finally `/set VAULT_API_ENABLED true` to turn it on "
-                "- or ask an admin to do this for you on the admin console's Users page. Until then, use "
-                "open_key_vault_app instead."
+                "sign in and enable it (Security tab -> 'Enable companion API'), then ask the admin to set "
+                "VAULT_COMPANION_PORT / VAULT_COMPANION_TOKEN (from that same tab / this machine's "
+                "companion.json) and enable the companion API for this chat on the admin console's Users "
+                "page. Until then, use open_key_vault_app instead."
             ),
         }
     if not settings.vault_companion_port:

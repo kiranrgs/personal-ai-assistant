@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     # WhatsApp (via Twilio)
     whatsapp_enabled: bool = Field(default=False, alias="WHATSAPP_ENABLED")
     twilio_whatsapp_from: str = Field(default="", alias="TWILIO_WHATSAPP_FROM")
+    # Comma-separated E.164 numbers (e.g. +15551234567) allowed to talk to the
+    # assistant over WhatsApp. Empty = nobody (fail closed).
+    whatsapp_allowed_numbers: str = Field(default="", alias="WHATSAPP_ALLOWED_NUMBERS")
 
     # LLM routing
     llm_default_provider: str = Field(default="groq", alias="LLM_DEFAULT_PROVIDER")
@@ -113,6 +116,11 @@ class Settings(BaseSettings):
 
     # Geofencing / household presence webhook (see webhook_server.py's /presence endpoint)
     presence_webhook_secret: str = Field(default="", alias="PRESENCE_WEBHOOK_SECRET")
+    # Admin console refuses non-localhost clients unless this is true (and
+    # then only over HTTPS, e.g. behind a TLS reverse proxy).
+    admin_allow_remote: bool = Field(default=False, alias="ADMIN_ALLOW_REMOTE")
+    # Confirm/Cancel prompts older than this can no longer be approved (0 = never expire).
+    pending_action_ttl_minutes: int = Field(default=30, alias="PENDING_ACTION_TTL_MINUTES")
 
     # Anomaly detection (rate-limit unusually repetitive tool calls per chat)
     anomaly_tool_call_threshold: int = Field(default=15, alias="ANOMALY_TOOL_CALL_THRESHOLD")
@@ -165,6 +173,10 @@ class Settings(BaseSettings):
         return [int(v) for v in _split_csv(self.discord_allowed_channel_ids)]
 
     @property
+    def whatsapp_allowed_number_list(self) -> list[str]:
+        return _split_csv(self.whatsapp_allowed_numbers)
+
+    @property
     def google_account_labels(self) -> list[str]:
         return _split_csv(self.google_accounts)
 
@@ -211,7 +223,7 @@ def get_settings() -> Settings:
     `get_settings()` unchanged while still being multi-user-aware.
     """
     try:
-        from src.core.user_config import get_current_chat, load_user_overrides
+        from src.core.user_config import ALL_OVERRIDE_KEYS, get_current_chat, is_isolated_chat, load_user_overrides
     except ImportError:  # pragma: no cover - user_config always available in this repo
         return _base_settings()
 
@@ -220,12 +232,22 @@ def get_settings() -> Settings:
         return _base_settings()
 
     overrides = load_user_overrides(chat_id)
-    if not overrides:
+    isolated = is_isolated_chat(chat_id)
+    if not overrides and not isolated:
         return _base_settings()
 
-    cache_key = (chat_id, tuple(sorted(overrides.items())))
+    cache_key = (chat_id, isolated, tuple(sorted(overrides.items())))
     cached = _user_settings_cache.get(cache_key)
     if cached is None:
-        cached = Settings(**overrides)
+        values: dict[str, Any] = {}
+        if isolated:
+            # Isolated (self-signup desktop) chats never inherit the owner's
+            # per-user credentials/paths from the root .env - reset every
+            # per-user key to its code default before applying their own.
+            for field in Settings.model_fields.values():
+                if field.alias in ALL_OVERRIDE_KEYS:
+                    values[field.alias] = field.get_default(call_default_factory=True)
+        values.update(overrides)
+        cached = Settings(**values)
         _user_settings_cache[cache_key] = cached
     return cached

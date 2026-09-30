@@ -11,8 +11,10 @@ import {
   getVaultCards,
   LlmModel,
   Me,
+  removeTelegramLink,
   setSetting,
   setVaultCardDefault,
+  startTelegramLink,
   VaultCard,
 } from "../lib/apiClient";
 
@@ -23,6 +25,8 @@ export default function Settings({ me, onSignOut }: { me: Me; onSignOut: () => v
   const [newKey, setNewKey] = useState("");
   const [newValue, setNewValue] = useState("");
   const [telegramId, setTelegramId] = useState(me.settings[TELEGRAM_KEY] ?? "");
+  const [linkCode, setLinkCode] = useState<{ code: string; minutes: number } | null>(null);
+  const [linkError, setLinkError] = useState<string | null>(null);
 
   const [cards, setCards] = useState<VaultCard[]>([]);
   const [defaults, setDefaults] = useState<Record<string, VaultCard>>({});
@@ -86,13 +90,19 @@ export default function Settings({ me, onSignOut }: { me: Me; onSignOut: () => v
     await refreshSettings();
   }
 
-  async function handleSaveTelegram(e: FormEvent) {
-    e.preventDefault();
-    if (telegramId.trim()) {
-      await setSetting(TELEGRAM_KEY, telegramId.trim());
-    } else {
-      await deleteSetting(TELEGRAM_KEY);
+  async function handleStartTelegramLink() {
+    setLinkError(null);
+    try {
+      const result = await startTelegramLink();
+      setLinkCode({ code: result.code, minutes: Math.round(result.expires_in_seconds / 60) });
+    } catch (err) {
+      setLinkError(err instanceof Error ? err.message : "Couldn't create a link code.");
     }
+  }
+
+  async function handleUnlinkTelegram() {
+    await removeTelegramLink();
+    setLinkCode(null);
     await refreshSettings();
   }
 
@@ -135,17 +145,32 @@ export default function Settings({ me, onSignOut }: { me: Me; onSignOut: () => v
       <section>
         <h2>Telegram notifications</h2>
         <p className="muted">
-          Link your Telegram chat ID so scheduled alerts (e.g. wishlist notifications) can reach you there
+          Link a Telegram chat so scheduled alerts (e.g. wishlist notifications) can reach you there
           even while you're using the desktop app.
         </p>
-        <form onSubmit={handleSaveTelegram} className="inline-form">
-          <input
-            placeholder="Telegram chat ID"
-            value={telegramId}
-            onChange={(e) => setTelegramId(e.target.value)}
-          />
-          <button type="submit">Save</button>
-        </form>
+        {telegramId ? (
+          <p>
+            Linked to Telegram chat {telegramId}.{" "}
+            <button className="link-button" onClick={handleUnlinkTelegram}>
+              Unlink
+            </button>
+          </p>
+        ) : null}
+        <div className="inline-form">
+          <button type="button" onClick={handleStartTelegramLink}>
+            {telegramId ? "Link a different chat" : "Get link code"}
+          </button>
+          <button type="button" className="link-button" onClick={() => void refreshSettings()}>
+            Refresh
+          </button>
+        </div>
+        {linkCode && (
+          <p>
+            Send <code>/link {linkCode.code}</code> to the Telegram bot from the chat you want linked, then
+            click Refresh. The code expires in {linkCode.minutes} minutes and works once.
+          </p>
+        )}
+        {linkError && <p className="form-error">{linkError}</p>}
       </section>
 
       <section>

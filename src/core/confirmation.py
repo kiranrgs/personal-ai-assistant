@@ -6,8 +6,10 @@ Confirm/Reject button callback) actually runs the tool's `executor`.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from src.core.settings import get_settings
 from src.core.tool_registry import PendingConfirmation, get_tool
 from src.core.user_config import set_current_chat
 from src.db import supabase_client as db
@@ -21,12 +23,34 @@ def create(chat_id: int, pending: PendingConfirmation) -> dict[str, Any]:
     return action
 
 
+def _is_expired(action: dict[str, Any]) -> bool:
+    ttl = get_settings().pending_action_ttl_minutes
+    created_raw = action.get("created_at")
+    if ttl <= 0 or not created_raw:
+        return False
+    created = datetime.fromisoformat(str(created_raw).replace("Z", "+00:00"))
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - created > timedelta(minutes=ttl)
+
+
 def resolve(action_id: str, approved: bool) -> dict[str, Any]:
     action = db.get_pending_action(action_id)
     if action is None:
         return {"ok": False, "message": "This confirmation no longer exists."}
     if action["status"] != "pending":
         return {"ok": False, "message": f"This action was already {action['status']}."}
+
+    # Atomically claim it so two concurrent Confirm clicks can't both execute.
+    if db.claim_pending_action(action_id) is None:
+        return {"ok": False, "message": "This action was already handled."}
+
+    # An old, forgotten prompt shouldn't be approvable days later (prices,
+    # context and intent may all have changed).
+    if _is_expired(action):
+        db.resolve_pending_action(action_id, "expired")
+        db.log_audit_event(action["chat_id"], "confirmation_expired", {"action_id": action_id})
+        return {"ok": False, "message": "This request has expired - please ask again."}
 
     if not approved:
         db.resolve_pending_action(action_id, "rejected")

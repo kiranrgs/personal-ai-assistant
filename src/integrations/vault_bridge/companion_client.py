@@ -18,7 +18,10 @@ from typing import Any
 
 from src.core.settings import get_settings
 
-_TIMEOUT_SECONDS = 5.0
+# The vault now relays every request through its own server to Supabase
+# (2+ round trips per action) and gives up itself after 20s, so wait a
+# little longer than that rather than timing out first.
+_TIMEOUT_SECONDS = 25.0
 
 
 class CompanionApiError(RuntimeError):
@@ -42,7 +45,8 @@ def call(action: str, **params: Any) -> dict[str, Any]:
         raise CompanionApiError(
             "VAULT_COMPANION_PORT isn't set - copy the port from this machine's "
             "companion.json (see personal-key-vault's Security tab -> 'Enable "
-            "companion API') into `/set VAULT_COMPANION_PORT <port>` first."
+            "companion API') and have the admin set VAULT_COMPANION_PORT for this "
+            "chat on the admin console's Users page first."
         )
     request: dict[str, Any] = {
         "app": settings.vault_app_name,

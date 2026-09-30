@@ -29,9 +29,17 @@ client = discord.Client(intents=intents)
 
 
 class ConfirmView(discord.ui.View):
-    def __init__(self, action_id: str):
+    def __init__(self, action_id: str, requester_id: int):
         super().__init__(timeout=3600)
         self.action_id = action_id
+        self.requester_id = requester_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        # Only the person who asked may confirm/cancel - not anyone else in the channel.
+        if interaction.user.id != self.requester_id:
+            await interaction.response.send_message("Only the person who made this request can confirm it.", ephemeral=True)
+            return False
+        return True
 
     @discord.ui.button(label="✅ Confirm", style=discord.ButtonStyle.success)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
@@ -47,8 +55,8 @@ class ConfirmView(discord.ui.View):
 
 
 def _is_allowed(channel_id: int) -> bool:
-    allowed = get_settings().discord_allowed_channel_id_list
-    return not allowed or channel_id in allowed
+    # Fail closed: no configured channels means the bot answers nowhere.
+    return channel_id in get_settings().discord_allowed_channel_id_list
 
 
 @client.event
@@ -66,7 +74,7 @@ async def on_message(message: discord.Message) -> None:
 
     if result.pending_action:
         action_id = result.pending_action["id"]
-        await message.channel.send(result.pending_action["summary"], view=ConfirmView(action_id))
+        await message.channel.send(result.pending_action["summary"], view=ConfirmView(action_id, message.author.id))
     if result.reply:
         await message.channel.send(result.reply)
 

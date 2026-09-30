@@ -2,7 +2,7 @@
 // talks to Supabase directly and never holds Supabase project credentials -
 // it only ever calls this server over HTTP, with a bearer token attached to
 // every request after sign-in.
-import { Store } from "@tauri-apps/plugin-store";
+import { invoke } from "@tauri-apps/api/core";
 
 const SERVER_URL = (import.meta.env.VITE_SERVER_URL as string | undefined)?.replace(/\/+$/, "");
 
@@ -41,46 +41,63 @@ export class ApiError extends Error {
   }
 }
 
-const SESSION_STORE_FILE = "session.json";
-let cachedStore: Store | null = null;
+// Session storage: only the refresh token is persisted, and it lives in the
+// OS credential store (Windows Credential Manager / macOS Keychain / Linux
+// Secret Service) via the Rust commands in src-tauri/src/main.rs - never in
+// a plaintext file. The short-lived access token is kept in memory only; on
+// app start the stored refresh token is exchanged for a fresh session.
 let cachedSession: Session | null = null;
-let loadedFromDisk = false;
+let sessionLoad: Promise<Session | null> | null = null;
 
-async function getStore(): Promise<Store> {
-  if (!cachedStore) {
-    cachedStore = await Store.load(SESSION_STORE_FILE);
-  }
-  return cachedStore;
-}
-
-async function persist(): Promise<void> {
-  const store = await getStore();
-  if (cachedSession) {
-    await store.set("session", cachedSession);
+async function saveRefreshToken(token: string | null): Promise<void> {
+  if (token) {
+    await invoke("save_refresh_token", { token });
   } else {
-    await store.delete("session");
+    await invoke("clear_refresh_token");
   }
-  await store.save();
 }
 
 export async function setSession(session: Session): Promise<void> {
   cachedSession = session;
-  loadedFromDisk = true;
-  await persist();
+  sessionLoad = Promise.resolve(session);
+  await saveRefreshToken(session.refresh_token);
 }
 
 export async function clearSession(): Promise<void> {
   cachedSession = null;
-  loadedFromDisk = true;
-  await persist();
+  sessionLoad = Promise.resolve(null);
+  await saveRefreshToken(null);
+}
+
+async function restoreSession(): Promise<Session | null> {
+  const stored = await invoke<string | null>("load_refresh_token");
+  if (!stored) {
+    return null;
+  }
+  const response = await fetch(`${SERVER_URL}/auth/refresh`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ refresh_token: stored }),
+  });
+  if (!response.ok) {
+    // Only forget the token when the server actually rejected it - not on a
+    // transient network/server error.
+    if (response.status === 401 || response.status === 400) {
+      await saveRefreshToken(null);
+    }
+    return null;
+  }
+  const session = (await response.json()) as Session;
+  cachedSession = session;
+  await saveRefreshToken(session.refresh_token);
+  return session;
 }
 
 export async function getSession(): Promise<Session | null> {
-  if (!loadedFromDisk) {
-    const store = await getStore();
-    cachedSession = ((await store.get("session")) as Session | undefined) ?? null;
-    loadedFromDisk = true;
+  if (!sessionLoad) {
+    sessionLoad = restoreSession().catch(() => null);
   }
+  await sessionLoad;
   return cachedSession;
 }
 
@@ -110,7 +127,12 @@ async function request<T>(path: string, init: RequestInit = {}, retry = true): P
     let detail = response.statusText;
     try {
       const body = await response.json();
-      detail = body.detail ?? detail;
+      if (Array.isArray(body.detail)) {
+        // FastAPI validation errors: [{ loc, msg, ... }]
+        detail = body.detail.map((d: { msg?: string }) => d.msg ?? "Invalid input").join("; ");
+      } else {
+        detail = body.detail ?? detail;
+      }
     } catch {
       // ignore - not JSON
     }
@@ -239,6 +261,14 @@ export function setSetting(key: string, value: string) {
 
 export function deleteSetting(key: string) {
   return request<{ ok: boolean }>(`/settings/${encodeURIComponent(key)}`, { method: "DELETE" });
+}
+
+export function startTelegramLink() {
+  return request<{ code: string; expires_in_seconds: number }>("/telegram-link", { method: "POST" });
+}
+
+export function removeTelegramLink() {
+  return request<{ ok: boolean }>("/telegram-link", { method: "DELETE" });
 }
 
 export interface VaultCard {

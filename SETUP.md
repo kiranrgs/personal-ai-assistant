@@ -102,6 +102,11 @@ import, the error will name the missing package - re-run
    [supabase/migrations/0003_tenants.sql](supabase/migrations/0003_tenants.sql)
    too (additive - adds the `tenants` table for multi-tenant Telegram bots,
    see section 3). Run 0001, then 0002, then 0003, in that order.
+   Also run 0004 (section on the desktop client) and then
+   [supabase/migrations/0005_enable_rls.sql](supabase/migrations/0005_enable_rls.sql)
+   last - it turns on Row Level Security for every table so the public
+   `anon` key / a user's own login token can't read other people's data
+   through Supabase's REST API (the server's service-role key is unaffected).
 5. **Project Settings -> API**: copy the **Project URL** and the
    **`service_role` secret key** (not the `anon` key - this runs entirely
    server-side, on your own machine, never exposed to a browser).
@@ -325,8 +330,8 @@ to share the same numeric Telegram user ID under two different bots.
   (its own email/password, unrelated to this app's Supabase project) -
   since this machine's one installed vault app could be signed into
   anyone's account, each person must link their own chat to their own
-  vault account email once, via `/set VAULT_ACCOUNT_EMAIL you@example.com`
-  (or the admin console's Users page) - `open_key_vault_app()` refuses to
+  vault account email once. The admin sets `VAULT_ACCOUNT_EMAIL` for that chat
+  on the admin console's Users page (users can't `/set` it themselves) - `open_key_vault_app()` refuses to
   run for a chat that hasn't linked one, and always echoes back the linked
   email so you can visually confirm the unlocked vault matches before
   copying a card.
@@ -336,17 +341,17 @@ to share the same numeric Telegram user ID under two different bots.
     resolve a default card per spend category (so a purchase that doesn't
     name a card falls back to whatever's pinned - or most-used - for that
     category) instead of only bringing the vault to the foreground. It's
-    off by default for every chat; turn it on (after enabling it in
-    personal-key-vault's own Security tab -> "Enable companion API") with:
+    off by default for every chat. After enabling it in personal-key-vault's
+    own Security tab -> "Enable companion API", the admin sets these for the
+    chat on the admin console's Users page (they're admin-only keys):
     ```
-    /set VAULT_COMPANION_PORT <port from companion.json>
-    /set VAULT_COMPANION_TOKEN <this app's token from the Security tab>
-    /set VAULT_API_ENABLED true
+    VAULT_COMPANION_PORT = <port from companion.json>
+    VAULT_COMPANION_TOKEN = <this app's token from the Security tab>
     ```
-    or do all three for someone else from the admin console's Users page,
-    which also has a per-user "Card defaults" page for pinning/clearing a
+    then clicks "enable" in the Vault companion API column. The same page
+    has a per-user "Card defaults" page for pinning/clearing a
     default card per spend category (e.g. "utilities", "online shopping").
-    Turn it back off any time with `/set VAULT_API_ENABLED false`.
+    Turn it back off any time with the "disable" button.
 
 Skip either if you didn't clone those sibling repos onto this machine.
 
@@ -362,11 +367,14 @@ extra setup needed to isolate them. To let each person configure their
    console's Tenants page (comma-separated, see section 3).
 2. Each person messages the bot `/whoami` to confirm their chat is
    recognized, then `/set KEY VALUE` for anything personal - e.g.
-   `/set GOOGLE_ACCOUNTS personal` or `/set TWITTER_FOLLOWED_HANDLES
-   handle1,handle2`. `/myconfig` lists what's saved (values masked);
+   `/set TWITTER_FOLLOWED_HANDLES handle1,handle2`. `/myconfig` lists what's saved (values masked);
    `/unset KEY` removes one. Only a whitelisted subset of settings can be
-   set this way (personal accounts/integrations) - shared admin-only
-   settings (bot tokens, Supabase key, allow-lists) always stay in the
+   set this way (personal API keys/integrations). Keys that pick shared
+   server-side credentials or local paths (`GOOGLE_ACCOUNTS`, `MS_ACCOUNTS`,
+   `ICLOUD_ACCOUNTS`, `YAHOO_ACCOUNTS`, `FINANCE_BOT_PATH`,
+   `PERSONAL_KEY_VAULT_PATH`, `HOMEBRIDGE_URL`, `VAULT_*`, ...) are
+   admin-only - set them on the admin console's Users page. Shared settings
+   (bot tokens, Supabase key, allow-lists) always stay in the
    root `.env`/admin console.
 3. For **household geofencing** (see next section and README's Security
    model), everyone in the same home runs `/household NAME` with the same
@@ -623,9 +631,21 @@ server you control for the desktop client to work; it doesn't touch
    defaults - identical per-user isolation model to Telegram/WhatsApp/Discord
    chats, just keyed by their Supabase Auth user id instead of a chat platform id.
 6. To let a desktop user also receive Telegram-only notifications (e.g.
-   wishlist price alerts), have them set `LINKED_TELEGRAM_CHAT_ID` from the
-   desktop app's Settings page (or `/set LINKED_TELEGRAM_CHAT_ID <id>` from
-   Telegram) - this is a one-way notification link, not a merged chat history.
+   wishlist price alerts), they click **Get link code** in the desktop app's
+   Settings page and send `/link CODE` to the Telegram bot from their
+   (allow-listed) Telegram chat within 10 minutes. The code is single-use,
+   so nobody can link a Telegram chat they don't control. This is a one-way
+   notification link, not a merged chat history.
+7. The desktop app keeps only its refresh token, in the OS credential store
+   (Windows Credential Manager / macOS Keychain / Linux Secret Service); the
+   access token lives in memory only. Production builds also restrict the
+   app's network access to the `VITE_SERVER_URL` origin.
+8. `client_api_server.py`, `webhook_server.py` and the admin console refuse
+   plain-HTTP requests from other machines - use a TLS reverse proxy or
+   tunnel on the same host. If the proxy forwards the real client IP, start
+   uvicorn with `--proxy-headers --forwarded-allow-ips=<proxy ip>` so login
+   rate limits apply per real client. The admin console only answers
+   localhost unless `ADMIN_ALLOW_REMOTE=true`.
 
 ---
 

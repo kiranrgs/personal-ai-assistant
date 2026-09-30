@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Optional
 
+from src.core import user_config
 from src.db import supabase_client as db
 
 log = logging.getLogger(__name__)
@@ -24,15 +25,21 @@ class AuthError(RuntimeError):
 
 
 def _chat_for_auth_user(user_id: str, email: Optional[str]) -> dict[str, Any]:
-    return db.get_or_create_chat("desktop", user_id, display_name=email)
+    chat = db.get_or_create_chat("desktop", user_id, display_name=email)
+    # Desktop accounts are open self-signup, so they must never inherit the
+    # owner's personal credentials from the shared root .env.
+    user_config.mark_isolated_chat(chat["id"])
+    return chat
 
 
 def sign_up(email: str, password: str) -> dict[str, Any]:
-    client = db.get_client()
+    client = db.get_auth_client()
     try:
         result = client.auth.sign_up({"email": email, "password": password})
     except Exception as exc:  # noqa: BLE001 - gotrue raises its own exception types
-        raise AuthError(str(exc)) from exc
+        # Generic message: don't reveal whether an email is already registered.
+        log.info("Sign up failed: %s", exc)
+        raise AuthError("Sign up failed - check the email/password and try again.") from exc
     if result.user is None:
         raise AuthError("Sign up failed - check the email/password and try again.")
 
@@ -51,7 +58,7 @@ def sign_up(email: str, password: str) -> dict[str, Any]:
 
 
 def sign_in(email: str, password: str) -> dict[str, Any]:
-    client = db.get_client()
+    client = db.get_auth_client()
     try:
         result = client.auth.sign_in_with_password({"email": email, "password": password})
     except Exception as exc:  # noqa: BLE001
@@ -70,7 +77,7 @@ def sign_in(email: str, password: str) -> dict[str, Any]:
 
 
 def refresh_session(refresh_token: str) -> dict[str, Any]:
-    client = db.get_client()
+    client = db.get_auth_client()
     try:
         result = client.auth.refresh_session(refresh_token)
     except Exception as exc:  # noqa: BLE001
@@ -87,7 +94,7 @@ def verify_token(access_token: str) -> dict[str, Any]:
     """
     if not access_token:
         raise AuthError("Missing bearer token.")
-    client = db.get_client()
+    client = db.get_auth_client()
     try:
         result = client.auth.get_user(access_token)
     except Exception as exc:  # noqa: BLE001

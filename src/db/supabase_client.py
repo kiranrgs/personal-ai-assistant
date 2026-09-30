@@ -9,7 +9,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from supabase import Client, create_client
+from supabase import Client, ClientOptions, create_client
 
 from src.core.settings import get_settings
 
@@ -29,6 +29,23 @@ def get_client() -> Client:
             )
         _client = create_client(settings.supabase_url, settings.supabase_service_role_key)
     return _client
+
+
+def get_auth_client() -> Client:
+    """A fresh, throwaway client for end-user Auth calls (sign up / sign in /
+    refresh / get_user). Never run those on the shared `get_client()`
+    instance: supabase-py swaps that client's DB Authorization header to the
+    signed-in user's JWT on SIGNED_IN/TOKEN_REFRESHED, which would make every
+    later server-side query (for every user) run as whoever logged in last.
+    """
+    settings = get_settings()
+    if not settings.supabase_url or not settings.supabase_service_role_key:
+        raise RuntimeError("Supabase is not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in .env.")
+    return create_client(
+        settings.supabase_url,
+        settings.supabase_service_role_key,
+        options=ClientOptions(persist_session=False, auto_refresh_token=False),
+    )
 
 
 def get_or_create_chat(
@@ -152,6 +169,21 @@ def latest_pending_action_for_chat(chat_id: int) -> Optional[dict[str, Any]]:
         .eq("status", "pending")
         .order("created_at", desc=True)
         .limit(1)
+        .execute()
+    )
+    return result.data[0] if result.data else None
+
+
+def claim_pending_action(action_id: str) -> Optional[dict[str, Any]]:
+    """Atomically move a pending action to 'confirmed'. Returns the row only
+    for the single caller that won the race (prevents double execution from
+    double-clicks / replayed callbacks)."""
+    result = (
+        get_client()
+        .table("pending_actions")
+        .update({"status": "confirmed"})
+        .eq("id", action_id)
+        .eq("status", "pending")
         .execute()
     )
     return result.data[0] if result.data else None

@@ -22,12 +22,14 @@ from __future__ import annotations
 import logging
 from typing import Any, Optional
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from fastapi.responses import PlainTextResponse
+from pydantic import BaseModel, Field
 
-from src.core import client_auth, confirmation, llm_models, user_config
+from src.core import client_auth, confirmation, llm_models, net_guard, telegram_link, user_config
 from src.core.orchestrator import handle_user_message
+from src.core.rate_limit import SlidingWindowLimiter
 from src.core.settings import get_settings
 from src.core.user_config import set_current_chat
 from src.db import supabase_client as db
@@ -37,15 +39,29 @@ log = logging.getLogger("client_api_server")
 app = FastAPI(title="personal-ai-assistant client API")
 
 # The Tauri desktop client's webview calls this like a normal web app would
-# (fetch with an Authorization header, no cookies) - every route still
-# requires a valid bearer token, so a permissive CORS policy here doesn't by
-# itself expose any user's data to another origin.
+# (fetch with an Authorization header, no cookies). Only the Tauri webview
+# origins (and the Vite dev server) are allowed, so a random website a
+# signed-in user visits can't script calls against this API.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=[
+        "tauri://localhost",
+        "http://tauri.localhost",
+        "https://tauri.localhost",
+        "http://localhost:1420",
+    ],
+    allow_methods=["GET", "POST", "DELETE"],
+    allow_headers=["Authorization", "Content-Type"],
 )
+
+
+@app.middleware("http")
+async def _require_https_for_remote(request: Request, call_next):
+    # Passwords and bearer tokens must never cross the network in clear text.
+    # Local clients and a TLS-terminating proxy/tunnel on this host are fine.
+    if net_guard.is_insecure_remote_request(request):
+        return PlainTextResponse("HTTPS required.", status_code=403)
+    return await call_next(request)
 
 
 def _bearer_token(authorization: str = Header(default="")) -> str:
@@ -61,22 +77,45 @@ def current_identity(token: str = Depends(_bearer_token)) -> dict[str, Any]:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
 
 
+# Brute-force / abuse limits. Keyed by client IP - when running behind a
+# reverse proxy, start uvicorn with --proxy-headers --forwarded-allow-ips=<proxy ip>
+# so request.client.host is the real caller, not the proxy.
+_auth_ip_limiter = SlidingWindowLimiter(max_events=20, window_seconds=300)
+_signup_ip_limiter = SlidingWindowLimiter(max_events=5, window_seconds=3600)
+_login_email_limiter = SlidingWindowLimiter(max_events=10, window_seconds=900)
+_refresh_ip_limiter = SlidingWindowLimiter(max_events=60, window_seconds=300)
+_chat_limiter = SlidingWindowLimiter(max_events=30, window_seconds=60)
+_link_code_limiter = SlidingWindowLimiter(max_events=5, window_seconds=600)
+
+
+def _enforce(limiter: SlidingWindowLimiter, key: str) -> None:
+    if not limiter.hit(key):
+        raise HTTPException(status_code=429, detail="Too many requests - please wait a bit and try again.")
+
+
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
 class SignUpBody(BaseModel):
-    email: str
-    password: str
+    email: str = Field(max_length=320)
+    password: str = Field(min_length=8, max_length=256)
 
 
 class LoginBody(BaseModel):
-    email: str
-    password: str
+    email: str = Field(max_length=320)
+    password: str = Field(max_length=256)
 
 
 class RefreshBody(BaseModel):
-    refresh_token: str
+    refresh_token: str = Field(max_length=4096)
 
 
 @app.post("/auth/signup")
-def signup(body: SignUpBody) -> dict[str, Any]:
+def signup(body: SignUpBody, request: Request) -> dict[str, Any]:
+    ip = _client_ip(request)
+    _enforce(_auth_ip_limiter, ip)
+    _enforce(_signup_ip_limiter, ip)
     try:
         return client_auth.sign_up(body.email, body.password)
     except client_auth.AuthError as exc:
@@ -84,7 +123,9 @@ def signup(body: SignUpBody) -> dict[str, Any]:
 
 
 @app.post("/auth/login")
-def login(body: LoginBody) -> dict[str, Any]:
+def login(body: LoginBody, request: Request) -> dict[str, Any]:
+    _enforce(_auth_ip_limiter, _client_ip(request))
+    _enforce(_login_email_limiter, body.email.strip().lower())
     try:
         return client_auth.sign_in(body.email, body.password)
     except client_auth.AuthError as exc:
@@ -92,7 +133,8 @@ def login(body: LoginBody) -> dict[str, Any]:
 
 
 @app.post("/auth/refresh")
-def refresh(body: RefreshBody) -> dict[str, Any]:
+def refresh(body: RefreshBody, request: Request) -> dict[str, Any]:
+    _enforce(_refresh_ip_limiter, _client_ip(request))
     try:
         return client_auth.refresh_session(body.refresh_token)
     except client_auth.AuthError as exc:
@@ -105,13 +147,13 @@ def me(identity: dict[str, Any] = Depends(current_identity)) -> dict[str, Any]:
     return {
         "chat_id": chat_id,
         "email": identity["email"],
-        "settings": user_config.load_user_overrides(chat_id),
+        "settings": user_config.list_user_overrides_for_display(chat_id),
     }
 
 
 class ChatMessageBody(BaseModel):
-    message: str
-    model_id: Optional[str] = None
+    message: str = Field(min_length=1, max_length=8000)
+    model_id: Optional[str] = Field(default=None, max_length=200)
 
 
 def _validate_allowed_model(model_id: str) -> str:
@@ -137,6 +179,7 @@ def list_llm_models(identity: dict[str, Any] = Depends(current_identity)) -> dic
 
 @app.post("/chat")
 def send_chat_message(body: ChatMessageBody, identity: dict[str, Any] = Depends(current_identity)) -> dict[str, Any]:
+    _enforce(_chat_limiter, str(identity["chat_id"]))
     model_override = _validate_allowed_model(body.model_id) if body.model_id else None
     result = handle_user_message(identity["chat_id"], body.message, model_override=model_override)
     pending_action = None
@@ -150,6 +193,7 @@ def send_chat_message(body: ChatMessageBody, identity: dict[str, Any] = Depends(
 
 @app.get("/chat/history")
 def chat_history(limit: int = 50, identity: dict[str, Any] = Depends(current_identity)) -> dict[str, Any]:
+    limit = max(1, min(limit, 200))
     return {"messages": db.recent_messages(identity["chat_id"], limit=limit)}
 
 
@@ -170,7 +214,7 @@ def confirm_action(body: ConfirmBody, identity: dict[str, Any] = Depends(current
 
 class BookmarkBody(BaseModel):
     message_id: int
-    note: Optional[str] = None
+    note: Optional[str] = Field(default=None, max_length=1000)
 
 
 @app.get("/bookmarks")
@@ -196,13 +240,13 @@ def remove_bookmark(bookmark_id: int, identity: dict[str, Any] = Depends(current
 
 
 class SettingBody(BaseModel):
-    key: str
-    value: str
+    key: str = Field(max_length=100)
+    value: str = Field(max_length=2000)
 
 
 @app.get("/settings")
 def get_settings_route(identity: dict[str, Any] = Depends(current_identity)) -> dict[str, Any]:
-    return {"settings": user_config.load_user_overrides(identity["chat_id"])}
+    return {"settings": user_config.list_user_overrides_for_display(identity["chat_id"])}
 
 
 @app.post("/settings")
@@ -220,7 +264,24 @@ def set_setting(body: SettingBody, identity: dict[str, Any] = Depends(current_id
 
 @app.delete("/settings/{key}")
 def delete_setting(key: str, identity: dict[str, Any] = Depends(current_identity)) -> dict[str, Any]:
-    user_config.unset_user_override(identity["chat_id"], key)
+    try:
+        user_config.unset_user_override(identity["chat_id"], key)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True}
+
+
+# --- Verified Telegram notification link (see core/telegram_link.py) ---
+@app.post("/telegram-link")
+def start_telegram_link(identity: dict[str, Any] = Depends(current_identity)) -> dict[str, Any]:
+    _enforce(_link_code_limiter, str(identity["chat_id"]))
+    code = telegram_link.create_link_code(identity["chat_id"])
+    return {"code": code, "expires_in_seconds": telegram_link.CODE_TTL_SECONDS}
+
+
+@app.delete("/telegram-link")
+def remove_telegram_link(identity: dict[str, Any] = Depends(current_identity)) -> dict[str, Any]:
+    telegram_link.unlink(identity["chat_id"])
     return {"ok": True}
 
 
@@ -265,8 +326,8 @@ def vault_card_defaults(identity: dict[str, Any] = Depends(current_identity)) ->
 
 
 class CardDefaultBody(BaseModel):
-    category: str
-    card_id: str
+    category: str = Field(min_length=1, max_length=100)
+    card_id: str = Field(min_length=1, max_length=100)
 
 
 @app.post("/vault/card-defaults")

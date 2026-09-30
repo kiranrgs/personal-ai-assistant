@@ -29,7 +29,7 @@ from telegram.ext import (
     filters,
 )
 
-from src.core import confirmation, llm_models, user_config
+from src.core import confirmation, llm_models, telegram_link, user_config
 from src.core.llm_router import transcribe_audio
 from src.core.orchestrator import handle_user_message
 from src.core.settings import get_settings
@@ -72,8 +72,19 @@ def _split_csv_ints(value: str) -> list[int]:
 
 
 def _is_allowed(chat_id: int, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    # Fail closed: an empty allow-list means nobody, not everybody - otherwise
+    # any stranger who finds the bot could use the owner's shared integrations.
     allowed = context.bot_data.get("allowed_chat_ids") or []
-    return not allowed or chat_id in allowed
+    return chat_id in allowed
+
+
+async def _reject_if_not_allowed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Returns True (and tells the user) when this chat isn't allow-listed."""
+    if update.effective_chat is None or not _is_allowed(update.effective_chat.id, context):
+        if update.effective_chat is not None:
+            await update.effective_chat.send_message("This bot isn't configured to respond to this chat.")
+        return True
+    return False
 
 
 def _tenant_id(context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -88,13 +99,22 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "smart home, files, or anything else I'm connected to. For anything "
         "involving money, calls, or smart-home actions I'll always ask you to "
         "confirm first.\n\nUse /whoami to see your chat id, /myconfig to see your "
-        "personal settings, /set KEY VALUE and /unset KEY to configure them, and "
-        "/household NAME to join a household for shared geofencing."
+        "personal settings, /set KEY VALUE and /unset KEY to configure them, "
+        "/household NAME to join a household for shared geofencing, and /link CODE "
+        "to link your desktop app account to this chat."
     )
 
 
 async def whoami_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_chat is None:
+        return
+    if not _is_allowed(update.effective_chat.id, context):
+        # Still tell strangers their id (so an admin can allow-list them), but
+        # don't create database rows for chats that aren't allowed.
+        await update.effective_chat.send_message(
+            f"Telegram chat id: {update.effective_chat.id}\n"
+            "This chat isn't allow-listed yet - send this id to the bot's admin."
+        )
         return
     chat_row = db.get_or_create_chat(
         "telegram", str(update.effective_chat.id), update.effective_chat.full_name, tenant_id=_tenant_id(context)
@@ -108,7 +128,7 @@ async def whoami_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def myconfig_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.effective_chat is None:
+    if update.effective_chat is None or await _reject_if_not_allowed(update, context):
         return
     chat_row = db.get_or_create_chat(
         "telegram", str(update.effective_chat.id), update.effective_chat.full_name, tenant_id=_tenant_id(context)
@@ -125,7 +145,7 @@ async def myconfig_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 async def set_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.effective_chat is None:
+    if update.effective_chat is None or await _reject_if_not_allowed(update, context):
         return
     if len(context.args or []) < 2:
         await update.effective_chat.send_message("Usage: /set KEY VALUE")
@@ -146,7 +166,7 @@ async def set_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def unset_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.effective_chat is None:
+    if update.effective_chat is None or await _reject_if_not_allowed(update, context):
         return
     if not context.args:
         await update.effective_chat.send_message("Usage: /unset KEY")
@@ -154,12 +174,16 @@ async def unset_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     chat_row = db.get_or_create_chat(
         "telegram", str(update.effective_chat.id), update.effective_chat.full_name, tenant_id=_tenant_id(context)
     )
-    user_config.unset_user_override(chat_row["id"], context.args[0])
+    try:
+        user_config.unset_user_override(chat_row["id"], context.args[0])
+    except ValueError as exc:
+        await update.effective_chat.send_message(str(exc))
+        return
     await update.effective_chat.send_message(f"Removed your override for {context.args[0].upper()}.")
 
 
 async def household_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if update.effective_chat is None:
+    if update.effective_chat is None or await _reject_if_not_allowed(update, context):
         return
     if not context.args:
         await update.effective_chat.send_message("Usage: /household NAME (everyone using the same NAME shares geofencing away/home automation)")
@@ -170,6 +194,20 @@ async def household_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     household = " ".join(context.args)
     db.set_user_household(chat_row["id"], household)
     await update.effective_chat.send_message(f"You're now part of household '{household}'.")
+
+
+async def link_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if update.effective_chat is None or await _reject_if_not_allowed(update, context):
+        return
+    if not context.args:
+        await update.effective_chat.send_message(
+            "Usage: /link CODE - get the code from the desktop app's Settings page (Telegram notifications)."
+        )
+        return
+    if telegram_link.redeem_link_code(context.args[0], update.effective_chat.id) is None:
+        await update.effective_chat.send_message("That code is invalid or has expired - generate a new one in the desktop app.")
+        return
+    await update.effective_chat.send_message("Linked. Your desktop account's notifications can now reach this chat.")
 
 
 async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -231,6 +269,16 @@ async def on_confirmation_callback(update: Update, context: ContextTypes.DEFAULT
         return
     await query.answer()
     action, action_id = query.data.split(":", 1)
+    # Only the chat the prompt was sent to (and only an allow-listed one) may
+    # resolve it - never trust the callback data alone.
+    tg_chat = query.message.chat if query.message is not None else None
+    pending = db.get_pending_action(action_id)
+    if tg_chat is None or pending is None or not _is_allowed(tg_chat.id, context):
+        return
+    chat_row = db.get_or_create_chat("telegram", str(tg_chat.id), tenant_id=_tenant_id(context))
+    if pending["chat_id"] != chat_row["id"]:
+        log.warning("Rejected confirmation %s from chat %s (belongs to another chat)", action_id, tg_chat.id)
+        return
     outcome = confirmation.resolve(action_id, approved=(action == "confirm"))
     await query.edit_message_reply_markup(reply_markup=None)
     if query.message is not None:
@@ -348,6 +396,7 @@ def build_application(tenant: dict[str, Any]) -> Application:
     app.add_handler(CommandHandler("set", set_command))
     app.add_handler(CommandHandler("unset", unset_command))
     app.add_handler(CommandHandler("household", household_command))
+    app.add_handler(CommandHandler("link", link_command))
     app.add_handler(CallbackQueryHandler(on_confirmation_callback, pattern=r"^(confirm|reject):"))
     app.add_handler(MessageHandler(filters.VOICE, on_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))

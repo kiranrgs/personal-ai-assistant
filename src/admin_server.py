@@ -30,11 +30,13 @@ import html
 import logging
 import secrets
 
-from fastapi import Depends, FastAPI, Form, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse
+from urllib.parse import urlsplit
+
+from fastapi import Depends, FastAPI, Form, HTTPException, Request
+from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
-from src.core import user_config
+from src.core import net_guard, user_config
 from src.core.settings import get_settings
 from src.core.user_config import set_current_chat
 from src.db import supabase_client as db
@@ -43,6 +45,34 @@ from src.integrations.vault_bridge import personal_key_vault_client as vault
 log = logging.getLogger("admin_server")
 app = FastAPI()
 security = HTTPBasic()
+
+_SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+
+
+@app.middleware("http")
+async def _csrf_and_framing_guard(request: Request, call_next):
+    # The console holds every tenant's bot token and every user's settings -
+    # only serve it to this machine unless explicitly opted in, and never
+    # over plain HTTP to a remote client (Basic auth would be sent in clear).
+    if not net_guard.is_local_request(request):
+        if not get_settings().admin_allow_remote:
+            return PlainTextResponse("Admin console is only available from localhost.", status_code=403)
+        if net_guard.is_insecure_remote_request(request):
+            return PlainTextResponse("HTTPS required.", status_code=403)
+    # Basic-auth credentials are re-sent automatically by the browser, so any
+    # other site the admin visits could otherwise auto-submit a form to this
+    # console (CSRF). Require state-changing requests to come from this origin.
+    if request.method not in _SAFE_METHODS:
+        source = request.headers.get("origin") or request.headers.get("referer") or ""
+        host = request.headers.get("host", "")
+        if not source or not host or urlsplit(source).netloc != host:
+            return PlainTextResponse("Cross-site request blocked.", status_code=403)
+    response = await call_next(request)
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "same-origin"
+    return response
 
 _PAGE_STYLE = (
     "body{font-family:system-ui,sans-serif;max-width:900px;margin:2rem auto;padding:0 1rem}"
@@ -172,8 +202,9 @@ def users_page(_: None = Depends(_require_admin)) -> HTMLResponse:
         "<label>Value</label><input name='value' required>"
         "<button type='submit'>Save</button>"
         "</form>"
-        "<p>Allowed keys mirror the /set Telegram command's whitelist - "
-        "shared admin-only settings (bot tokens, Supabase key, allow-lists) can't be set here either.</p>"
+        "<p>Accepts every per-user key, including admin-only ones users can't /set themselves "
+        "(vault account/companion settings, account labels, local paths). Shared bot settings "
+        "(bot tokens, Supabase key, allow-lists) can't be set here.</p>"
     )
     return _page("Users", body)
 
@@ -186,7 +217,7 @@ def set_user_override_route(
     _: None = Depends(_require_admin),
 ) -> RedirectResponse:
     try:
-        user_config.set_user_override(chat_id, key, value)
+        user_config.set_user_override(chat_id, key, value, admin=True)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return RedirectResponse("/users", status_code=303)
@@ -198,7 +229,7 @@ def toggle_vault_api(
     enable: str = Form(...),
     _: None = Depends(_require_admin),
 ) -> RedirectResponse:
-    user_config.set_user_override(chat_id, "VAULT_API_ENABLED", enable)
+    user_config.set_user_override(chat_id, "VAULT_API_ENABLED", enable, admin=True)
     return RedirectResponse("/users", status_code=303)
 
 

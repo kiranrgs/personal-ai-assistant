@@ -16,6 +16,7 @@ Both always require Telegram confirmation before dialing.
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlencode
 
 from src.core.settings import get_settings
 from src.core.tool_registry import PendingConfirmation, Tool, register
@@ -34,9 +35,14 @@ def _client():
 
 
 def _place_announcement_call(to_number: str, message: str) -> dict[str, Any]:
+    from twilio.twiml.voice_response import VoiceResponse
+
     settings = get_settings()
-    twiml = f"<Response><Say>{message}</Say></Response>"
-    call = _client().calls.create(to=to_number, from_=settings.twilio_from_number, twiml=twiml)
+    # Build TwiML via the library so the (LLM-authored) message is XML-escaped
+    # and can't inject extra verbs like <Dial> or <Redirect>.
+    vr = VoiceResponse()
+    vr.say(message)
+    call = _client().calls.create(to=to_number, from_=settings.twilio_from_number, twiml=str(vr))
     return {"status": "dialing", "call_sid": call.sid}
 
 
@@ -47,7 +53,8 @@ def _place_interactive_call(to_number: str, opening_message: str, purpose: str) 
     call = _client().calls.create(
         to=to_number,
         from_=settings.twilio_from_number,
-        url=f"{settings.public_webhook_base_url}/voice/interactive?opening={opening_message}&purpose={purpose}",
+        url=f"{settings.public_webhook_base_url.rstrip('/')}/voice/interactive?"
+        + urlencode({"opening": opening_message, "purpose": purpose}),
     )
     return {"status": "dialing", "call_sid": call.sid}
 
