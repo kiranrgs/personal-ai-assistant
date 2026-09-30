@@ -144,6 +144,22 @@ class Settings(BaseSettings):
     # src/integrations/vault_bridge/personal_key_vault_client.py.
     vault_account_email: str = Field(default="", alias="VAULT_ACCOUNT_EMAIL")
 
+    # personal-key-vault's "Companion apps API" - an opt-in, per-user upgrade
+    # over the manual open_key_vault_app() flow above. When enabled, this
+    # assistant can create/look up a companion-API user, fetch cards/
+    # credentials, and resolve/manage per-category default cards, all over a
+    # loopback-only token-authenticated socket (never Supabase directly).
+    # Left OFF by default - a user opts in (and can opt back out any time)
+    # with `/set VAULT_API_ENABLED true` (or the admin console), same as
+    # VAULT_ACCOUNT_EMAIL above, which must also be set first. Host/port/
+    # token come from that machine's companion.json + the Security tab in
+    # personal-key-vault - see its README's "Companion apps API" section.
+    vault_api_enabled: bool = Field(default=False, alias="VAULT_API_ENABLED")
+    vault_companion_host: str = Field(default="127.0.0.1", alias="VAULT_COMPANION_HOST")
+    vault_companion_port: int = Field(default=0, alias="VAULT_COMPANION_PORT")
+    vault_companion_token: str = Field(default="", alias="VAULT_COMPANION_TOKEN")
+    vault_app_name: str = Field(default="personal-ai-assistant", alias="VAULT_APP_NAME")
+
     @property
     def discord_allowed_channel_id_list(self) -> list[int]:
         return [int(v) for v in _split_csv(self.discord_allowed_channel_ids)]

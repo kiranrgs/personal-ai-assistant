@@ -56,6 +56,13 @@ ALLOWED_OVERRIDE_KEYS = {
     "FOOD_DEALS_ZIP_CODE", "FOOD_DEALS_CITY",
     "BRIEFING_LATITUDE", "BRIEFING_LONGITUDE",
     "FINANCE_BOT_PATH", "PERSONAL_KEY_VAULT_PATH", "VAULT_ACCOUNT_EMAIL",
+    "VAULT_API_ENABLED", "VAULT_COMPANION_HOST", "VAULT_COMPANION_PORT", "VAULT_COMPANION_TOKEN",
+    # Set from the desktop client's Settings screen so scheduled jobs (wishlist
+    # alerts, morning briefing, etc.) can also reach this person on Telegram -
+    # get the numeric id from the bot's /whoami command. This is a soft,
+    # notification-only link (same pattern as VAULT_ACCOUNT_EMAIL above), not
+    # a merge of the two chats' conversation history.
+    "LINKED_TELEGRAM_CHAT_ID",
 }
 
 _current_chat: contextvars.ContextVar[Optional[int]] = contextvars.ContextVar("current_chat", default=None)

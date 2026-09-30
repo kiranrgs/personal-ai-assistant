@@ -377,3 +377,41 @@ def create_tenant(name: str, telegram_bot_token: str, telegram_allowed_chat_ids:
 def set_tenant_active(tenant_id: int, active: bool) -> dict[str, Any]:
     result = get_client().table("tenants").update({"active": active}).eq("id", tenant_id).execute()
     return result.data[0]
+
+
+# --- Message bookmarks (desktop client's chat window - see client_api_server.py) ---
+
+def get_message(message_id: int) -> Optional[dict[str, Any]]:
+    result = get_client().table("messages").select("*").eq("id", message_id).limit(1).execute()
+    return result.data[0] if result.data else None
+
+
+def add_bookmark(chat_id: int, message_id: int, note: str | None = None) -> dict[str, Any]:
+    result = (
+        get_client()
+        .table("chat_bookmarks")
+        .upsert({"chat_id": chat_id, "message_id": message_id, "note": note}, on_conflict="chat_id,message_id")
+        .execute()
+    )
+    return result.data[0]
+
+
+def list_bookmarks(chat_id: int) -> list[dict[str, Any]]:
+    result = (
+        get_client()
+        .table("chat_bookmarks")
+        .select("*, messages(*)")
+        .eq("chat_id", chat_id)
+        .order("created_at", desc=True)
+        .execute()
+    )
+    return result.data
+
+
+def get_bookmark(bookmark_id: int) -> Optional[dict[str, Any]]:
+    result = get_client().table("chat_bookmarks").select("*").eq("id", bookmark_id).limit(1).execute()
+    return result.data[0] if result.data else None
+
+
+def remove_bookmark(bookmark_id: int) -> None:
+    get_client().table("chat_bookmarks").delete().eq("id", bookmark_id).execute()

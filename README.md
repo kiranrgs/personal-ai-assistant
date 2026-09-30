@@ -113,6 +113,7 @@ copy .env.example .env
 uvicorn src.admin_server:app --port 8090        # 1. Admin console: register your first Telegram bot here
 python -m src.bot                              # 2. Telegram bot(s) - reads tenants registered above
 uvicorn src.webhook_server:app --port 8000      # WhatsApp + interactive calls (optional)
+uvicorn src.client_api_server:app --port 8092   # Desktop client backend (optional, see apps/desktop)
 ```
 
 There's no `.env`-configured Telegram bot token anymore - every bot,
@@ -138,7 +139,7 @@ you plan to use.
 | Uber/Lyft/DoorDash/GrubHub/Domino's | Draft + open app/site for one-tap checkout (no personal-use booking APIs exist) |
 | Twilio calls (announcement + interactive) | Working once Twilio is set up; interactive calls need the webhook server exposed publicly |
 | WhatsApp | Working via Twilio WhatsApp + webhook server |
-| Personal-key-vault bridge | Intentionally manual-unlock only (see Security model) |
+| Personal-key-vault bridge | Manual-unlock by default; optional opt-in companion API for automated card/credential lookup + per-category default cards (see Security model) |
 | finance-bot trigger | Working - runs named jobs in finance-bot's own venv, always confirms first |
 | Multi-user / per-user config | Working - `/set`, `/unset`, `/myconfig`, `/whoami`, `/household` |
 | Clare Home | Real request shapes, exact endpoint paths vary by installation - verify against your hub/Fusion setup |
@@ -160,6 +161,7 @@ you plan to use.
 | Multi-tenant Telegram bots + admin console | Working - `src/admin_server.py`; new/changed tenants take effect on the next bot restart |
 | Job search across multiple portals (LinkedIn/Indeed/Glassdoor/ZipRecruiter) | Working once a search API key is set (web-search based, not a live ATS feed); save your profile once via `set_job_search_profile` |
 | Cross-platform (Windows/macOS/Ubuntu) | Working - pure Python + pathlib; see SETUP.md for OS-specific run/keep-alive steps |
+| Desktop client (Windows/macOS) | Backend (`src/client_api_server.py`) fully working and tested; `apps/desktop` Tauri+React frontend is build-verified (TypeScript/Vite) but its native Rust shell has not been compiled/tested in this environment - see [apps/desktop/README.md](apps/desktop/README.md) |
 
 ## Adding a new integration
 1. Add a module under `src/integrations/<area>/`.

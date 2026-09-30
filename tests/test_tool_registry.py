@@ -69,6 +69,11 @@ def test_tool_registry_has_expected_tools() -> None:
         "set_preference", "get_preferences",
         "search_past_conversations", "get_llm_usage_summary",
         "set_job_search_profile", "search_jobs",
+        "open_key_vault_app", "ensure_vault_user",
+        "get_vault_credentials", "get_vault_cards",
+        "create_vault_credential", "create_vault_card",
+        "resolve_vault_card_default", "set_vault_card_default",
+        "clear_vault_card_default", "list_vault_card_defaults", "record_vault_card_usage",
     ]:
         importlib.import_module("src.bot")
         assert any(t.name == name for t in all_tools()), f"Tool '{name}' was not registered"

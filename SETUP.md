@@ -310,16 +310,34 @@ to share the same numeric Telegram user ID under two different bots.
   (`personal-key-vault.app`) rather than a plain executable - see the
   `sys.platform` branching in
   `src/integrations/vault_bridge/personal_key_vault_client.py` if it can't
-  find it. The assistant only ever brings this app to the foreground for
-  you to manually unlock and copy a card - it never reads its secrets.
-  personal-key-vault has its **own, separate** Supabase Auth (its own
-  email/password, unrelated to this app's Supabase project) - since this
-  machine's one installed vault app could be signed into anyone's account,
-  each person must link their own chat to their own vault account email
-  once, via `/set VAULT_ACCOUNT_EMAIL you@example.com` (or the admin
-  console's Users page) - `open_key_vault_app()` refuses to run for a chat
-  that hasn't linked one, and always echoes back the linked email so you
-  can visually confirm the unlocked vault matches before copying a card.
+  find it. By default the assistant only ever brings this app to the
+  foreground for you to manually unlock and copy a card - it never reads
+  its secrets. personal-key-vault has its **own, separate** Supabase Auth
+  (its own email/password, unrelated to this app's Supabase project) -
+  since this machine's one installed vault app could be signed into
+  anyone's account, each person must link their own chat to their own
+  vault account email once, via `/set VAULT_ACCOUNT_EMAIL you@example.com`
+  (or the admin console's Users page) - `open_key_vault_app()` refuses to
+  run for a chat that hasn't linked one, and always echoes back the linked
+  email so you can visually confirm the unlocked vault matches before
+  copying a card.
+  - **Companion API (optional, opt-in upgrade)**: personal-key-vault also
+    exposes a loopback-only, token-authenticated "Companion apps API" that
+    lets this assistant create a linked user, fetch cards/credentials, and
+    resolve a default card per spend category (so a purchase that doesn't
+    name a card falls back to whatever's pinned - or most-used - for that
+    category) instead of only bringing the vault to the foreground. It's
+    off by default for every chat; turn it on (after enabling it in
+    personal-key-vault's own Security tab -> "Enable companion API") with:
+    ```
+    /set VAULT_COMPANION_PORT <port from companion.json>
+    /set VAULT_COMPANION_TOKEN <this app's token from the Security tab>
+    /set VAULT_API_ENABLED true
+    ```
+    or do all three for someone else from the admin console's Users page,
+    which also has a per-user "Card defaults" page for pinning/clearing a
+    default card per spend category (e.g. "utilities", "online shopping").
+    Turn it back off any time with `/set VAULT_API_ENABLED false`.
 
 Skip either if you didn't clone those sibling repos onto this machine.
 
@@ -460,6 +478,10 @@ python -m src.discord_bot
 
 # Terminal 4 - Admin console: only needed when adding/editing tenants or user overrides
 uvicorn src.admin_server:app --port 8090
+
+# Terminal 5 - Desktop client API: only needed if you're using the downloadable
+# Mac/Windows client (see section 17)
+uvicorn src.client_api_server:app --port 8092
 ```
 
 Windows: `scripts\run_bot.bat`, `scripts\run_webhook_server.bat`,
@@ -555,6 +577,49 @@ scripted version of the above instead of the GUI.
 
 ---
 
+## 17. Desktop client (optional download for Mac/Windows users)
+
+A downloadable chat client under [apps/desktop](apps/desktop) - the user
+sees only a chat window, a bookmarks sidebar, and a settings page (no code,
+no tool internals). It talks to a dedicated backend, `src/client_api_server.py`,
+over HTTPS/loopback-HTTP - this is the only process that needs to run on a
+server you control for the desktop client to work; it doesn't touch
+`bot.py`/`webhook_server.py`/`discord_bot.py` at all.
+
+1. **Enable email/password sign-in in this project's own Supabase project**
+   (Authentication -> Providers -> Email, in the Supabase dashboard for the
+   *same* project you set up in section 2 - this is separate from any
+   `personal-key-vault` Supabase project). Decide whether to require email
+   confirmation there; if enabled, new desktop sign-ups get a
+   `confirmation_required` response and must click the emailed link before
+   they can sign in.
+2. **Run the client API server**: `uvicorn src.client_api_server:app --port 8092`
+   (Terminal 5 above, or `scripts\run_client_api_server.bat` /
+   `scripts/run_client_api_server.sh` if present). Put this behind HTTPS
+   (e.g. a reverse proxy or tunnel) before pointing a real client at
+   anything other than `127.0.0.1`.
+3. **Run the migration** [supabase/migrations/0004_desktop_accounts.sql](supabase/migrations/0004_desktop_accounts.sql)
+   in the Supabase SQL editor (adds the `desktop` chat channel and the
+   `chat_bookmarks` table), same manual-run convention as the other
+   `supabase/migrations/*.sql` files in this repo.
+4. **Build/run the desktop client**: see [apps/desktop/README.md](apps/desktop/README.md)
+   for full instructions (`npm install`, `.env` setup pointing
+   `VITE_SERVER_URL` at step 2's server, `npm run tauri dev`/`npm run tauri build`).
+   Building the native shell requires Rust/Cargo (`rustup.rs`) in addition
+   to Node.js - only the React/TypeScript frontend has been build-verified
+   in this repo so far, the Rust/Tauri packaging step needs to be verified
+   on your own machine.
+5. Each person who signs up in the desktop app gets their own `chats` row
+   (channel `desktop`) and their own isolated settings/bookmarks/vault
+   defaults - identical per-user isolation model to Telegram/WhatsApp/Discord
+   chats, just keyed by their Supabase Auth user id instead of a chat platform id.
+6. To let a desktop user also receive Telegram-only notifications (e.g.
+   wishlist price alerts), have them set `LINKED_TELEGRAM_CHAT_ID` from the
+   desktop app's Settings page (or `/set LINKED_TELEGRAM_CHAT_ID <id>` from
+   Telegram) - this is a one-way notification link, not a merged chat history.
+
+---
+
 ## Troubleshooting quick reference
 
 | Symptom | Likely cause / fix |
@@ -571,6 +636,9 @@ scripted version of the above instead of the GUI.
 | New/edited tenant in the admin console isn't picked up | Tenants are only loaded at `python -m src.bot` startup, not hot-reloaded - restart the bot process. |
 | `python-key-vault`/`finance-bot` "not found" on macOS/Ubuntu | Set `PERSONAL_KEY_VAULT_PATH`/`FINANCE_BOT_PATH` to that sibling repo's actual location on this machine (any OS path works, not just Windows). |
 | `open_key_vault_app` returns `not_linked` | That chat hasn't linked a personal-key-vault account yet - send `/set VAULT_ACCOUNT_EMAIL you@example.com` (section 9) once. |
+| Desktop client shows "Missing VITE_SERVER_URL" | Copy `apps/desktop/.env.example` to `apps/desktop/.env` and set it before running `npm run dev`/`tauri dev` (section 17). |
+| Desktop client startup throws "is plain HTTP but points at a non-local host" | `VITE_SERVER_URL` points at a non-loopback host over `http://` - use `https://`, or point it at `127.0.0.1`/`localhost` for local testing only (section 17). |
+| Desktop sign-up returns `confirmation_required` and login then fails | Email confirmation is enabled on the Supabase project - click the emailed confirmation link before signing in (section 17). |
 
 ## Security reminders (see README's "Security model" for full detail)
 

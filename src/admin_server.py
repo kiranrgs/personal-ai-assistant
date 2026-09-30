@@ -9,6 +9,9 @@ hand-editing `.env` or restarting a running bot process:
   - View every known user (across every tenant/channel) and set a per-user
     config override on their behalf - the same whitelist as the `/set`
     Telegram command (see `src/core/user_config.py`).
+  - Toggle a user's personal-key-vault companion-API integration
+    (VAULT_API_ENABLED) and manage their per-spend-category default cards -
+    see `src/integrations/vault_bridge/personal_key_vault_client.py`.
 
 Run with: uvicorn src.admin_server:app --port 8090
 
@@ -33,7 +36,9 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 from src.core import user_config
 from src.core.settings import get_settings
+from src.core.user_config import set_current_chat
 from src.db import supabase_client as db
+from src.integrations.vault_bridge import personal_key_vault_client as vault
 
 log = logging.getLogger("admin_server")
 app = FastAPI()
@@ -134,15 +139,28 @@ def users_page(_: None = Depends(_require_admin)) -> HTMLResponse:
     except Exception as exc:  # noqa: BLE001
         return _page("Users", f"<p>Couldn't load users from Supabase: {html.escape(str(exc))}</p>")
 
-    rows = ["<tr><th>Internal chat id</th><th>Tenant</th><th>Channel</th><th>External id</th><th>Household</th><th>Overrides (masked)</th></tr>"]
+    rows = [
+        "<tr><th>Internal chat id</th><th>Tenant</th><th>Channel</th><th>External id</th><th>Household</th>"
+        "<th>Overrides (masked)</th><th>Vault companion API</th><th></th></tr>"
+    ]
     for c in chats:
-        overrides = user_config.list_user_overrides_masked(c["id"])
-        user_row = db.get_user(c["id"]) or {}
+        chat_id = c["id"]
+        overrides = user_config.list_user_overrides_masked(chat_id)
+        raw_overrides = user_config.load_user_overrides(chat_id)
+        user_row = db.get_user(chat_id) or {}
         overrides_str = ", ".join(f"{k}={v}" for k, v in overrides.items()) or "(none)"
+        vault_enabled = raw_overrides.get("VAULT_API_ENABLED", "").strip().lower() in ("1", "true", "yes", "on")
+        toggle_label = "disable" if vault_enabled else "enable"
+        toggle_value = "false" if vault_enabled else "true"
         rows.append(
-            f"<tr><td>{c['id']}</td><td>{c.get('tenant_id', 0)}</td><td>{html.escape(c['channel'])}</td>"
+            f"<tr><td>{chat_id}</td><td>{c.get('tenant_id', 0)}</td><td>{html.escape(c['channel'])}</td>"
             f"<td>{html.escape(c['external_chat_id'])}</td><td>{html.escape(user_row.get('household') or '')}</td>"
-            f"<td>{html.escape(overrides_str)}</td></tr>"
+            f"<td>{html.escape(overrides_str)}</td>"
+            f"<td>{'on' if vault_enabled else 'off'} "
+            f"<form style='display:inline;border:none;padding:0;margin:0' method='post' action='/users/{chat_id}/vault-api/toggle'>"
+            f"<input type='hidden' name='enable' value='{toggle_value}'>"
+            f"<button type='submit'>{toggle_label}</button></form></td>"
+            f"<td><a href='/users/{chat_id}/vault-card-defaults'>Card defaults</a></td></tr>"
         )
 
     body = (
@@ -172,3 +190,94 @@ def set_user_override_route(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return RedirectResponse("/users", status_code=303)
+
+
+@app.post("/users/{chat_id}/vault-api/toggle")
+def toggle_vault_api(
+    chat_id: int,
+    enable: str = Form(...),
+    _: None = Depends(_require_admin),
+) -> RedirectResponse:
+    user_config.set_user_override(chat_id, "VAULT_API_ENABLED", enable)
+    return RedirectResponse("/users", status_code=303)
+
+
+@app.get("/users/{chat_id}/vault-card-defaults", response_class=HTMLResponse)
+def vault_card_defaults_page(chat_id: int, _: None = Depends(_require_admin)) -> HTMLResponse:
+    with set_current_chat(chat_id):
+        defaults_result = vault.list_vault_card_defaults()
+        cards_result = vault.get_vault_cards()
+
+    if defaults_result.get("status") or defaults_result.get("error"):
+        message = defaults_result.get("message") or defaults_result.get("error")
+        body = (
+            f"<p>Can't manage card defaults for chat {chat_id} yet: {html.escape(str(message))}</p>"
+            "<p><a href='/users'>&larr; Back to Users</a></p>"
+        )
+        return _page(f"Card defaults - chat {chat_id}", body)
+
+    defaults = defaults_result.get("defaults", [])
+    cards = cards_result.get("cards", []) if not (cards_result.get("status") or cards_result.get("error")) else []
+
+    rows = ["<tr><th>Category</th><th>Card</th><th></th></tr>"]
+    for d in defaults:
+        category = d.get("category", "")
+        card_id = d.get("card_id", "")
+        card_label = next(
+            (f"{c.get('label')} ({c.get('bankName')})" for c in cards if c.get("id") == card_id), card_id
+        )
+        rows.append(
+            f"<tr><td>{html.escape(category)}</td><td>{html.escape(str(card_label))}</td>"
+            f"<td><form style='display:inline;border:none;padding:0;margin:0' method='post' "
+            f"action='/users/{chat_id}/vault-card-defaults/clear'>"
+            f"<input type='hidden' name='category' value='{html.escape(category)}'>"
+            "<button type='submit'>clear</button></form></td></tr>"
+        )
+    if not defaults:
+        rows.append(
+            "<tr><td colspan='3'>No explicit category defaults pinned yet - unpinned categories fall back "
+            "to usage history.</td></tr>"
+        )
+
+    card_options = "".join(
+        f"<option value='{html.escape(str(c.get('id')))}'>{html.escape(str(c.get('label')))} "
+        f"({html.escape(str(c.get('bankName')))})</option>"
+        for c in cards
+    )
+    if not card_options:
+        card_options = "<option value=''>(no cards saved yet)</option>"
+
+    body = (
+        "<p><a href='/users'>&larr; Back to Users</a></p>"
+        "<table>" + "".join(rows) + "</table>"
+        f"<form method='post' action='/users/{chat_id}/vault-card-defaults/set'>"
+        "<h3>Set a category default</h3>"
+        "<label>Category</label><input name='category' required placeholder='e.g. utilities'>"
+        "<label>Card</label><select name='card_id' required>" + card_options + "</select>"
+        "<button type='submit'>Save</button>"
+        "</form>"
+    )
+    return _page(f"Card defaults - chat {chat_id}", body)
+
+
+@app.post("/users/{chat_id}/vault-card-defaults/set")
+def set_vault_card_default_route(
+    chat_id: int,
+    category: str = Form(...),
+    card_id: str = Form(...),
+    _: None = Depends(_require_admin),
+) -> RedirectResponse:
+    with set_current_chat(chat_id):
+        vault.set_vault_card_default(category, card_id)
+    return RedirectResponse(f"/users/{chat_id}/vault-card-defaults", status_code=303)
+
+
+@app.post("/users/{chat_id}/vault-card-defaults/clear")
+def clear_vault_card_default_route(
+    chat_id: int,
+    category: str = Form(...),
+    _: None = Depends(_require_admin),
+) -> RedirectResponse:
+    with set_current_chat(chat_id):
+        vault.clear_vault_card_default(category)
+    return RedirectResponse(f"/users/{chat_id}/vault-card-defaults", status_code=303)
