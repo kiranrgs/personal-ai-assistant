@@ -170,6 +170,15 @@ to share the same numeric Telegram user ID under two different bots.
 **Groq (default, cloud, fast, free tier):**
 1. Sign up at [console.groq.com](https://console.groq.com), create an API key.
 2. In `.env`: `GROQ_API_KEY=gsk_...`
+3. Models come from tier pools that mirror finance-bot (`GROQ_SMALL_MODEL_POOL`,
+   `GROQ_MEDIUM_MODEL_POOL`, `GROQ_HIGH_MODEL_POOL`; comma-separated, defaults
+   `qwen/qwen3.8-27b`, `openai/gpt-oss-20b`, `openai/gpt-oss-120b`). Repoint a tier
+   in `.env` if Groq retires a model.
+4. Default is the small tier. Desktop users pick small / medium / higher token
+   models in Settings or per chat; the dropdown is server-driven
+   (`GET /llm/models`) and the server rejects ids outside the catalog.
+5. Telegram, WhatsApp and Discord chats are restricted to small-tier models
+   (enforced server-side, including `/set GROQ_MODEL`).
 
 **Ollama (optional, fully local fallback):**
 1. Install [Ollama](https://ollama.com) on the same tower.

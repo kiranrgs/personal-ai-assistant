@@ -33,8 +33,8 @@ USERS_DIR = Path(__file__).resolve().parents[2] / "config" / "users"
 
 # Only these env-var names may be overridden per-user. Anything touching
 # shared infrastructure (Telegram bot token, Supabase service key, the
-# allow-list itself, webhook secrets, LLM provider/model) stays admin-only in
-# the root .env - a single user could otherwise repoint shared infra.
+# allow-list itself, webhook secrets, LLM provider) stays admin-only in the
+# root .env - a single user could otherwise repoint shared infra.
 ALLOWED_OVERRIDE_KEYS = {
     "GOOGLE_ACCOUNTS", "GOOGLE_OAUTH_CLIENT_SECRETS_FILE",
     "MS_CLIENT_ID", "MS_TENANT_ID", "MS_ACCOUNTS",
@@ -51,6 +51,7 @@ ALLOWED_OVERRIDE_KEYS = {
     "TWITTER_ACCESS_TOKEN", "TWITTER_ACCESS_TOKEN_SECRET", "TWITTER_FOLLOWED_HANDLES",
     "YOUTUBE_API_KEY",
     "SEARCH_API_KEY", "SEARCH_PROVIDER",
+    "GROQ_MODEL",
     "JOB_SEARCH_PORTALS", "JOB_SEARCH_DEFAULT_LOCATION",
     "WISHLIST_CHECK_INTERVAL_HOURS",
     "FOOD_DEALS_ZIP_CODE", "FOOD_DEALS_CITY",

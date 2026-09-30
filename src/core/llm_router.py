@@ -36,24 +36,25 @@ class LLMRouter:
     """
 
     def __init__(self) -> None:
-        self._settings = get_settings()
         self._groq_client = None
         self._ollama_client = None
 
     def _groq(self):
         if self._groq_client is None:
             from groq import Groq
+            settings = get_settings()
 
-            if not self._settings.groq_api_key:
+            if not settings.groq_api_key:
                 raise RuntimeError("GROQ_API_KEY is not set in .env")
-            self._groq_client = Groq(api_key=self._settings.groq_api_key)
+            self._groq_client = Groq(api_key=settings.groq_api_key)
         return self._groq_client
 
     def _ollama(self):
+        settings = get_settings()
         if self._ollama_client is None:
             import ollama
 
-            self._ollama_client = ollama.Client(host=self._settings.ollama_host)
+            self._ollama_client = ollama.Client(host=settings.ollama_host)
         return self._ollama_client
 
     def chat(
@@ -61,17 +62,26 @@ class LLMRouter:
         messages: list[dict[str, Any]],
         tools: Optional[list[dict[str, Any]]] = None,
         provider: Optional[str] = None,
+        model: Optional[str] = None,
     ) -> LLMResponse:
-        provider = provider or self._settings.llm_default_provider
+        settings = get_settings()
+        provider = provider or settings.llm_default_provider
         if provider == "groq":
-            return self._chat_groq(messages, tools)
+            return self._chat_groq(messages, tools, model=model)
         if provider == "ollama":
-            return self._chat_ollama(messages, tools)
+            return self._chat_ollama(messages, tools, model=model)
         raise ValueError(f"Unknown LLM provider: {provider}")
 
-    def _chat_groq(self, messages: list[dict[str, Any]], tools: Optional[list[dict[str, Any]]]) -> LLMResponse:
+    def _chat_groq(
+        self,
+        messages: list[dict[str, Any]],
+        tools: Optional[list[dict[str, Any]]],
+        model: Optional[str] = None,
+    ) -> LLMResponse:
+        settings = get_settings()
+        model_name = model or settings.groq_model
         client = self._groq()
-        kwargs: dict[str, Any] = {"model": self._settings.groq_model, "messages": messages}
+        kwargs: dict[str, Any] = {"model": model_name, "messages": messages}
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
@@ -81,7 +91,7 @@ class LLMRouter:
             ToolCall(id=tc.id, name=tc.function.name, arguments=json.loads(tc.function.arguments or "{}"))
             for tc in (choice.tool_calls or [])
         ]
-        self._log_usage("groq", self._settings.groq_model, completion)
+        self._log_usage("groq", model_name, completion)
         return LLMResponse(content=choice.content or "", tool_calls=tool_calls)
 
     def _log_usage(self, provider: str, model: str, completion: Any) -> None:
@@ -108,9 +118,16 @@ class LLMRouter:
         result = client.audio.transcriptions.create(file=(filename, audio_bytes), model="whisper-large-v3")
         return result.text
 
-    def _chat_ollama(self, messages: list[dict[str, Any]], tools: Optional[list[dict[str, Any]]]) -> LLMResponse:
+    def _chat_ollama(
+        self,
+        messages: list[dict[str, Any]],
+        tools: Optional[list[dict[str, Any]]],
+        model: Optional[str] = None,
+    ) -> LLMResponse:
+        settings = get_settings()
+        model_name = model or settings.ollama_model
         client = self._ollama()
-        kwargs: dict[str, Any] = {"model": self._settings.ollama_model, "messages": messages}
+        kwargs: dict[str, Any] = {"model": model_name, "messages": messages}
         if tools:
             kwargs["tools"] = tools
         response = client.chat(**kwargs)

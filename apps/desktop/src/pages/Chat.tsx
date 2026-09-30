@@ -6,10 +6,14 @@ import {
   ChatMessage,
   confirmAction,
   getChatHistory,
+  getLlmModels,
   listBookmarks,
+  LlmModel,
   Me,
+  modelOptionLabel,
   removeBookmark,
   sendChatMessage,
+  TIER_GROUPS,
 } from "../lib/apiClient";
 
 export default function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void }) {
@@ -19,10 +23,18 @@ export default function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void 
   const [sending, setSending] = useState(false);
   const [pendingAction, setPendingAction] = useState<{ action_id: string; summary: string } | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [models, setModels] = useState<LlmModel[]>([]);
+  const [modelId, setModelId] = useState<string>("");
 
   useEffect(() => {
     void loadHistory();
     void loadBookmarks();
+    getLlmModels()
+      .then((result) => {
+        setModels(result.models);
+        setModelId(result.selected_model);
+      })
+      .catch(() => setModels([]));
   }, []);
 
   async function loadHistory() {
@@ -57,7 +69,7 @@ export default function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void 
     const text = input;
     setInput("");
     try {
-      const result = await sendChatMessage(text);
+      const result = await sendChatMessage(text, modelId || undefined);
       setPendingAction(result.pending_action);
       await loadHistory();
     } catch {
@@ -124,6 +136,21 @@ export default function Chat({ me, onSignOut }: { me: Me; onSignOut: () => void 
         {error && <p className="form-error">{error}</p>}
 
         <form className="send-box" onSubmit={handleSend}>
+          {models.length > 0 && (
+            <select value={modelId} onChange={(e) => setModelId(e.target.value)} title="Model for this chat">
+              {TIER_GROUPS.map((group) => (
+                <optgroup key={group.tier} label={group.label}>
+                  {models
+                    .filter((model) => model.tier === group.tier)
+                    .map((model) => (
+                      <option key={model.id} value={model.id}>
+                        {modelOptionLabel(model)}
+                      </option>
+                    ))}
+                </optgroup>
+              ))}
+            </select>
+          )}
           <input
             value={input}
             onChange={(e) => setInput(e.target.value)}

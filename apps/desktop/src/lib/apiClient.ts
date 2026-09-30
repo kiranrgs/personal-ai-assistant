@@ -159,8 +159,34 @@ export interface ChatReply {
   pending_action: { action_id: string; summary: string } | null;
 }
 
-export function sendChatMessage(message: string) {
-  return request<ChatReply>("/chat", { method: "POST", body: JSON.stringify({ message }) });
+export function sendChatMessage(message: string, model_id?: string) {
+  return request<ChatReply>("/chat", { method: "POST", body: JSON.stringify({ message, model_id }) });
+}
+
+export interface LlmModel {
+  id: string;
+  label: string;
+  tier: "small" | "medium" | "high";
+  token_profile: "low" | "medium" | "high";
+}
+
+export const TIER_GROUPS: { tier: LlmModel["tier"]; label: string }[] = [
+  { tier: "small", label: "Small (low token use)" },
+  { tier: "medium", label: "Medium (medium token use)" },
+  { tier: "high", label: "Higher (high token use)" },
+];
+
+export function modelOptionLabel(model: LlmModel) {
+  return `${model.label} - ${model.tier} tier, ${model.token_profile} token consumption`;
+}
+
+export function getLlmModels() {
+  return request<{
+    provider: string;
+    default_model: string;
+    selected_model: string;
+    models: LlmModel[];
+  }>("/llm/models");
 }
 
 export interface ChatMessage {

@@ -26,8 +26,9 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from src.core import client_auth, confirmation, user_config
+from src.core import client_auth, confirmation, llm_models, user_config
 from src.core.orchestrator import handle_user_message
+from src.core.settings import get_settings
 from src.core.user_config import set_current_chat
 from src.db import supabase_client as db
 from src.integrations.vault_bridge import personal_key_vault_client as vault
@@ -110,11 +111,34 @@ def me(identity: dict[str, Any] = Depends(current_identity)) -> dict[str, Any]:
 
 class ChatMessageBody(BaseModel):
     message: str
+    model_id: Optional[str] = None
+
+
+def _validate_allowed_model(model_id: str) -> str:
+    normalized = model_id.strip()
+    if not llm_models.is_allowed_groq_model(normalized):
+        raise HTTPException(status_code=400, detail="Unsupported model id for this server.")
+    return normalized
+
+
+@app.get("/llm/models")
+def list_llm_models(identity: dict[str, Any] = Depends(current_identity)) -> dict[str, Any]:
+    models = llm_models.list_groq_models()
+    with set_current_chat(identity["chat_id"]):
+        selected = get_settings().groq_model
+    selected = llm_models.resolve_model(llm_models.DESKTOP_CHANNEL, user_preferred=selected)
+    return {
+        "provider": "groq",
+        "default_model": llm_models.default_model(),
+        "selected_model": selected,
+        "models": models,
+    }
 
 
 @app.post("/chat")
 def send_chat_message(body: ChatMessageBody, identity: dict[str, Any] = Depends(current_identity)) -> dict[str, Any]:
-    result = handle_user_message(identity["chat_id"], body.message)
+    model_override = _validate_allowed_model(body.model_id) if body.model_id else None
+    result = handle_user_message(identity["chat_id"], body.message, model_override=model_override)
     pending_action = None
     if result.pending_action:
         pending_action = {
@@ -183,8 +207,12 @@ def get_settings_route(identity: dict[str, Any] = Depends(current_identity)) -> 
 
 @app.post("/settings")
 def set_setting(body: SettingBody, identity: dict[str, Any] = Depends(current_identity)) -> dict[str, Any]:
+    key = body.key.strip().upper()
+    value = body.value.strip()
+    if key == "GROQ_MODEL":
+        value = _validate_allowed_model(value)
     try:
-        user_config.set_user_override(identity["chat_id"], body.key, body.value)
+        user_config.set_user_override(identity["chat_id"], key, value)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"ok": True}

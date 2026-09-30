@@ -29,7 +29,7 @@ from telegram.ext import (
     filters,
 )
 
-from src.core import confirmation, user_config
+from src.core import confirmation, llm_models, user_config
 from src.core.llm_router import transcribe_audio
 from src.core.orchestrator import handle_user_message
 from src.core.settings import get_settings
@@ -134,6 +134,10 @@ async def set_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         "telegram", str(update.effective_chat.id), update.effective_chat.full_name, tenant_id=_tenant_id(context)
     )
     key, value = context.args[0], " ".join(context.args[1:])
+    if key.strip().upper() == "GROQ_MODEL" and not llm_models.is_allowed_for_channel(value.strip(), "telegram"):
+        allowed = ", ".join(m["id"] for m in llm_models.list_models_for_channel("telegram"))
+        await update.effective_chat.send_message(f"Telegram only supports small-tier models: {allowed}")
+        return
     try:
         user_config.set_user_override(chat_row["id"], key, value)
         await update.effective_chat.send_message(f"Saved {key.upper()} for your chat only.")

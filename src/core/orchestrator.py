@@ -9,7 +9,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from src.core import confirmation
+from src.core import confirmation, llm_models
 from src.core.llm_router import get_llm_router
 from src.core.settings import get_settings
 from src.core.tool_registry import PendingConfirmation, all_schemas, get_tool
@@ -57,21 +57,28 @@ class OrchestratorResult:
     pending_action: Optional[dict[str, Any]] = None
 
 
-def handle_user_message(chat_id: int, user_text: str) -> OrchestratorResult:
+def handle_user_message(chat_id: int, user_text: str, model_override: Optional[str] = None) -> OrchestratorResult:
     with set_current_chat(chat_id):
-        return _handle_user_message(chat_id, user_text)
+        return _handle_user_message(chat_id, user_text, model_override=model_override)
 
 
-def _handle_user_message(chat_id: int, user_text: str) -> OrchestratorResult:
+def _handle_user_message(chat_id: int, user_text: str, model_override: Optional[str] = None) -> OrchestratorResult:
     db.add_message(chat_id, "user", user_text)
     messages = _build_messages(chat_id, user_text)
     router = get_llm_router()
     tools_schema = all_schemas()
     settings = get_settings()
 
+    # Only Groq has the tiered catalog; for other providers keep their own model.
+    model: Optional[str] = None
+    if settings.llm_default_provider == "groq":
+        chat_row = db.get_chat_by_internal_id(chat_id)
+        channel = chat_row.get("channel") if chat_row else None
+        model = llm_models.resolve_model(channel, requested=model_override, user_preferred=settings.groq_model)
+
     pending_action: Optional[dict[str, Any]] = None
     for _ in range(MAX_TOOL_HOPS):
-        response = router.chat(messages, tools=tools_schema or None)
+        response = router.chat(messages, tools=tools_schema or None, model=model)
         if not response.tool_calls:
             db.add_message(chat_id, "assistant", response.content)
             return OrchestratorResult(reply=response.content, pending_action=pending_action)
